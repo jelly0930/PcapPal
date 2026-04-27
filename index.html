@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PcapPal - CTF 流量分析工具</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div class="brand">
+        <span class="logo">🐟</span>
+        <h1>PcapPal</h1>
+        <span class="tagline">CTF 流量分析</span>
+      </div>
+      <div class="header-actions">
+        <input type="file" id="file-input" accept=".pcap,.pcapng,.cap" hidden>
+        <button class="btn" onclick="document.getElementById('file-input').click()">📁 打开流量包</button>
+      </div>
+    </header>
+
+    <!-- Drop Zone -->
+    <div id="drop-zone" class="drop-zone">
+      <div class="drop-hint">
+        <div class="drop-icon">📂</div>
+        <p>拖拽 pcap / pcapng 文件到此处</p>
+        <p class="drop-sub">或点击选择文件</p>
+      </div>
+    </div>
+
+    <!-- Main Workspace -->
+    <div class="workspace" id="workspace" style="display:none;">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-title">基础分析</div>
+          <div class="nav-item active" data-tool="packets">📋 数据包列表</div>
+          <div class="nav-item" data-tool="stats">📊 流量统计</div>
+        </div>
+        <div class="sidebar-section">
+          <div class="sidebar-title">CTF 专项</div>
+          <div class="nav-item" data-tool="flag">🎯 Flag 猎人</div>
+          <div class="nav-item" data-tool="usb">🔌 USB 流量</div>
+          <div class="nav-item" data-tool="icmp">📡 ICMP 隐写</div>
+          <div class="nav-item" data-tool="dns">🌐 DNS 分析</div>
+          <div class="nav-item" data-tool="files">📁 文件提取</div>
+          <div class="nav-item" data-tool="ftp">📠 FTP / Telnet</div>
+          <div class="nav-item" data-tool="webshell">🐚 Webshell 检测</div>
+          <div class="nav-item" data-tool="sql">💉 SQL 注入</div>
+          <div class="nav-item" data-tool="portscan">🚪 端口扫描</div>
+        </div>
+      </aside>
+
+      <div class="main-area">
+        <div class="content-panel" id="content-panel">
+          <!-- Dynamic content injected by app.js -->
+        </div>
+        <div class="output-panel" id="output-panel">
+          <div class="output-header">
+            <span>📝 分析日志</span>
+            <button class="btn tiny" id="clear-log">清空</button>
+            <button class="btn tiny" id="save-log">保存</button>
+          </div>
+          <div class="output-body" id="output-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <footer class="status-bar" id="status-bar">Ready. Drag a pcap file to start.</footer>
+  </div>
+
+  <div id="loader" class="loader" style="display:none;">
+    <div class="spinner"></div>
+    <span>解析中...</span>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
