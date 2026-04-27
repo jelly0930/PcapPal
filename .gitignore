@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pcap
+*.pcapng
+server.log
+server.pid
+*.Zone.Identifier
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
