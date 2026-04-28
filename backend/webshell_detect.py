@@ -4,12 +4,6 @@ import base64
 from typing import List, Dict, Any
 from fastapi import FastAPI, HTTPException
 from backend.session import get_session
-from backend.webshell_decryptor import (
-    analyze_transaction,
-    decrypt_transaction,
-    analyze_session,
-    WEBSHELL_DECRYPT_RULES,
-)
 
 WEBSHELL_SIGNATURES = {
     "china_chopper": re.compile(r"(eval|assert)\s*\(\s*[@$]\w+", re.I),
@@ -67,64 +61,3 @@ def register(app: FastAPI):
         if not sess:
             raise HTTPException(status_code=404, detail="Session not found")
         return analyze(sess)
-
-    @app.get("/api/session/{sid}/webshell/decrypt")
-    def api_decrypt_all(sid: str):
-        """Analyze and decrypt all HTTP transactions for webshell traffic."""
-        sess = get_session(sid)
-        if not sess:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        http_txs = sess.get("http_transactions", [])
-        if not http_txs:
-            # Lazy compute HTTP transactions if not cached
-            from main import get_http_transactions
-            http_txs = get_http_transactions(sid)
-            sess["http_transactions"] = http_txs
-
-        findings = analyze_session(http_txs)
-        return {
-            "count": len(findings),
-            "findings": findings,
-            "supported_types": [
-                {"id": k, "name": v["name"], "description": v["description"]}
-                for k, v in WEBSHELL_DECRYPT_RULES.items()
-            ],
-        }
-
-    @app.post("/api/session/{sid}/webshell/decrypt/{tx_id}")
-    def api_decrypt_single(sid: str, tx_id: int):
-        """Decrypt a specific HTTP transaction."""
-        sess = get_session(sid)
-        if not sess:
-            raise HTTPException(status_code=404, detail="Session not found")
-
-        http_txs = sess.get("http_transactions", [])
-        if not http_txs:
-            from main import get_http_transactions
-            http_txs = get_http_transactions(sid)
-            sess["http_transactions"] = http_txs
-
-        tx = None
-        for t in http_txs:
-            if t.get("id") == tx_id:
-                tx = t
-                break
-        if not tx:
-            raise HTTPException(status_code=404, detail="Transaction not found")
-
-        ws_info = analyze_transaction(tx)
-        if not ws_info:
-            return {
-                "transaction_id": tx_id,
-                "decrypted": False,
-                "message": "No known webshell pattern detected",
-            }
-
-        result = decrypt_transaction(tx, ws_info)
-        return {
-            "transaction_id": tx_id,
-            "decrypted": True,
-            "ws_info": ws_info,
-            "result": result,
-        }

@@ -518,12 +518,41 @@ def _extract_from_udp(packets: list) -> list:
     return files
 
 
+def _dedup_files(files: list) -> list:
+    """Remove duplicate files (same source, type, and size)."""
+    seen = set()
+    result = []
+    for f in files:
+        key = (f.get("source", ""), f.get("type", ""), f.get("size", 0))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(f)
+    return result
+
+
+# Max hex preview length in response (full hex available via separate download)
+_HEX_PREVIEW_LEN = 65536  # 32KB of hex = 16KB of binary
+
+
 def analyze(session: dict) -> dict:
     packets = session["packets"]
     http_files = _extract_from_http(packets)
     tcp_files = _extract_from_tcp(packets)
     udp_files = _extract_from_udp(packets)
-    all_files = http_files + tcp_files + udp_files
+    all_files = _dedup_files(http_files + tcp_files + udp_files)
+
+    # Truncate hex in response to avoid huge JSON payloads
+    for f in all_files:
+        hex_data = f.get("hex", "")
+        if len(hex_data) > _HEX_PREVIEW_LEN:
+            f["hex_preview"] = hex_data[:_HEX_PREVIEW_LEN]
+            f["hex_truncated"] = True
+        else:
+            f["hex_preview"] = hex_data
+            f["hex_truncated"] = False
+        # Remove full hex from response; kept only in hex_preview
+        del f["hex"]
 
     # Build summary
     proto_counts = {}

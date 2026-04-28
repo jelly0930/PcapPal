@@ -175,7 +175,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 .result-table th, .packet-table th {
   color: var(--text-secondary); background: var(--bg-tertiary);
   position: sticky; top: 0;
-  position: relative;
 }
 .result-table tbody tr:hover, .packet-table tbody tr:hover { background: var(--bg-hover); cursor: pointer; }
 .result-table td { word-break: break-all; }

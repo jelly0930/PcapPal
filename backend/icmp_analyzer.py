@@ -3,12 +3,7 @@ import re
 from typing import List, Dict
 from fastapi import FastAPI, HTTPException
 from backend.session import get_session
-
-
-def _safe_ascii(data: bytes) -> str:
-    if not data:
-        return ""
-    return "".join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else "." for b in data)
+from backend.utils import safe_ascii
 
 
 def _detect_tunnel(data: bytes) -> List[str]:
@@ -112,12 +107,12 @@ def analyze(session: dict) -> dict:
         "by_id": by_id[:100],
         "by_len": by_len[:100],
         "reconstructed_hex": reconstructed.hex(),
-        "reconstructed_ascii": _safe_ascii(reconstructed),
+        "reconstructed_ascii": safe_ascii(reconstructed),
         "reconstructed_text": reconstructed.decode("utf-8", errors="ignore") if reconstructed else "",
         "seq_ascii": seq_ascii[:500],
         "code_ascii": code_ascii[:500],
         "len_ascii": len_ascii[:500],
-        "first_bytes_ascii": _safe_ascii(first_bytes),
+        "first_bytes_ascii": safe_ascii(first_bytes),
         "first_bytes_text": first_bytes.decode("utf-8", errors="ignore") if first_bytes else "",
         "tunnel_hints": tunnel_hints[:20],
     }

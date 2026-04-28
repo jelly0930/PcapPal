@@ -9,6 +9,8 @@ def analyze(session: dict) -> dict:
     syn_counts = defaultdict(set)  # dst_ip -> {dst_port}
     open_ports = defaultdict(set)  # dst_ip -> {dst_port with SYN-ACK}
 
+    rst_counts = defaultdict(set)    # dst_ip -> {dst_port with RST}
+
     for p in packets:
         if p.get("protocol") not in ("TCP", "HTTP", "TLS"):
             continue
@@ -23,6 +25,8 @@ def analyze(session: dict) -> dict:
             syn_counts[dst].add(dport)
         elif "S" in flags and "A" in flags:
             open_ports[dst].add(dport)
+        elif "R" in flags:
+            rst_counts[dst].add(dport)
 
     scan_targets = []
     for ip, ports in syn_counts.items():
@@ -30,6 +34,7 @@ def analyze(session: dict) -> dict:
             scan_targets.append({
                 "target": ip,
                 "syn_ports": len(ports),
+                "rst_ports": len(rst_counts.get(ip, set())),
                 "open_ports": sorted(open_ports.get(ip, set())),
                 "sample_ports": sorted(list(ports))[:20],
             })

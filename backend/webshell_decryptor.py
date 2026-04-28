@@ -663,9 +663,8 @@ def register(app):
         sess = get_session(sid)
         if not sess:
             raise HTTPException(status_code=404, detail="Session not found")
-        # Import main.get_http_transactions dynamically to avoid circular import
         import main
-        transactions = main.get_http_transactions(sid)
+        transactions = main._get_http_transactions_cached(sess)
         findings = analyze_session(transactions)
         supported = []
         for rid, rule in WEBSHELL_DECRYPT_RULES.items():
@@ -688,7 +687,7 @@ def register(app):
         if not sess:
             raise HTTPException(status_code=404, detail="Session not found")
         import main
-        transactions = main.get_http_transactions(sid)
+        transactions = main._get_http_transactions_cached(sess)
         tx = None
         for t in transactions:
             if t.get("id") == tx_id:

@@ -59,6 +59,34 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+function hexToBytes(hexStr) {
+  if (!hexStr) return new Uint8Array(0);
+  const pairs = hexStr.match(/.{2}/g);
+  if (!pairs) return new Uint8Array(0);
+  return new Uint8Array(pairs.map(b => parseInt(b, 16)));
+}
+
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+function resetSessionState() {
+  state.packetPage = 1;
+  state.packetFilter = "";
+  state.sortKey = "";
+  state.sortDir = "asc";
+  state.timeMode = "absolute";
+  state.selectedPacketIdx = null;
+  state.jumpPacketIdx = null;
+  state.multiSelect.clear();
+  state.lastSelectedIdx = null;
+  state.detailCollapsed = false;
+}
+
 function formatTime(ts) {
   const d = new Date(ts * 1000);
   const pad = n => n.toString().padStart(2, "0");
@@ -86,12 +114,18 @@ function formatPacketTime(p) {
   return (d >= 0 ? "+" : "") + formatDuration(d);
 }
 
+const MAX_LOG_LINES = 500;
+
 function log(msg, type = "info") {
   const line = document.createElement("div");
   line.className = `log-line log-${type}`;
   const t = new Date().toLocaleTimeString();
   line.innerHTML = `<span class="log-time">[${t}]</span>${escapeHtml(msg)}`;
   outputBody.appendChild(line);
+  // Trim old log entries
+  while (outputBody.children.length > MAX_LOG_LINES) {
+    outputBody.removeChild(outputBody.firstChild);
+  }
   outputBody.scrollTop = outputBody.scrollHeight;
 }
 
@@ -135,6 +169,8 @@ function renderBookmarks() {
 }
 
 /* ===================== FILE UPLOAD ===================== */
+let uploading = false;
+
 function initDragDrop() {
   dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
   dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
@@ -146,6 +182,7 @@ function initDragDrop() {
   fileInput.addEventListener("change", e => {
     const file = e.target.files[0];
     if (file) uploadFile(file);
+    fileInput.value = "";
   });
   dropZone.addEventListener("click", (e) => {
     if (e.target.closest("#recent-files-wrap")) return;
@@ -154,6 +191,8 @@ function initDragDrop() {
 }
 
 async function uploadFile(file) {
+  if (uploading) return;
+  uploading = true;
   showLoader(true);
   setStatus(`Uploading ${file.name} ...`);
   const fd = new FormData();
@@ -164,16 +203,7 @@ async function uploadFile(file) {
     state.filename = data.filename;
     state.totalPackets = data.count;
     state.firstTimestamp = data.firstTimestamp || 0;
-    state.packetPage = 1;
-    state.packetFilter = "";
-    state.sortKey = "";
-    state.sortDir = "asc";
-    state.timeMode = "absolute";
-    state.selectedPacketIdx = null;
-    state.jumpPacketIdx = null;
-    state.multiSelect.clear();
-    state.lastSelectedIdx = null;
-    state.detailCollapsed = false;
+    resetSessionState();
     loadBookmarks();
     dropZone.style.display = "none";
     workspace.style.display = "flex";
@@ -184,10 +214,11 @@ async function uploadFile(file) {
     renderRecentFiles();
     renderCurrentTool();
   } catch (err) {
-    alert("Error: " + err.message);
+    log("Upload failed: " + err.message, "danger");
     setStatus("Upload failed");
   } finally {
     showLoader(false);
+    uploading = false;
   }
 }
 
@@ -217,11 +248,13 @@ function renderCurrentTool() {
 }
 
 /* ===================== KEYBOARD ===================== */
+let _renderPacketsSeq = 0;
+
 function initKeyboard() {
   document.addEventListener("keydown", (e) => {
     if (state.currentTool !== "packets") return;
     const active = document.activeElement;
-    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable)) return;
+    if (active && (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.tagName === "SELECT" || active.isContentEditable)) return;
 
     const rows = [...document.querySelectorAll("#pkt-body tr")];
     if (!rows.length) return;
@@ -318,6 +351,8 @@ function highlightPacketRow(idx) {
 }
 
 async function renderPackets() {
+  const seq = ++_renderPacketsSeq;
+
   contentPanel.innerHTML = `
     <div style="display:flex;flex-direction:column;height:100%;gap:8px;">
       <div class="panel-row" style="flex-shrink:0;align-items:center;">
@@ -389,6 +424,10 @@ async function renderPackets() {
   try {
     const sortParam = state.sortKey ? `&sort=${encodeURIComponent(state.sortKey)}&sort_dir=${encodeURIComponent(state.sortDir)}` : "";
     const data = await api("GET", `/api/session/${state.sid}/packets?page=${state.packetPage}&size=${state.packetSize}&filter=${encodeURIComponent(state.packetFilter)}${sortParam}`);
+
+    // Discard stale response if a newer renderPackets was called
+    if (seq !== _renderPacketsSeq) return;
+
     const tbody = $("pkt-body");
     tbody.innerHTML = "";
     state.totalFiltered = data.total;
@@ -407,7 +446,7 @@ async function renderPackets() {
           <td>${formatPacketTime(p)}</td>
           <td>${escapeHtml(p.src)}</td>
           <td>${escapeHtml(p.dst)}</td>
-          <td class="proto-${p.protocol.toLowerCase()}">${p.protocol}</td>
+          <td class="proto-${escapeHtml(p.protocol.toLowerCase())}">${escapeHtml(p.protocol)}</td>
           <td>${p.length}</td>
           <td class="info-col" title="${escapeHtml(p.info)}">${escapeHtml(p.info)}</td>
         `;
@@ -457,9 +496,11 @@ async function renderPackets() {
       renderPackets();
     });
 
+    // Cache rows once
+    const allRows = [...document.querySelectorAll("#pkt-body tr")];
+
     if (state.selectLastOnPage) {
       state.selectLastOnPage = false;
-      const allRows = [...document.querySelectorAll("#pkt-body tr")];
       const lastRow = allRows[allRows.length - 1];
       if (lastRow) {
         const idx = parseInt(lastRow.children[1].textContent);
@@ -467,7 +508,6 @@ async function renderPackets() {
       }
     } else if (state.autoSelectFirst) {
       state.autoSelectFirst = false;
-      const allRows = [...document.querySelectorAll("#pkt-body tr")];
       const firstRow = allRows[0];
       if (firstRow) {
         const idx = parseInt(firstRow.children[1].textContent);
@@ -480,13 +520,14 @@ async function renderPackets() {
       highlightPacketRow(targetIdx);
       showPacketDetail(targetIdx);
     } else if (state.selectedPacketIdx != null) {
-      const found = [...document.querySelectorAll("#pkt-body tr")].find(r => parseInt(r.children[1]?.textContent) === state.selectedPacketIdx);
+      const found = allRows.find(r => parseInt(r.children[1]?.textContent) === state.selectedPacketIdx);
       if (found) {
         highlightPacketRow(state.selectedPacketIdx);
         showPacketDetail(state.selectedPacketIdx);
       }
     }
   } catch (err) {
+    if (seq !== _renderPacketsSeq) return;
     log("Packets error: " + err.message, "danger");
   }
 }
@@ -528,11 +569,13 @@ function renderPagination(total, totalUnfiltered, page, size, callback) {
 
 /* ===================== PACKET DETAIL ===================== */
 async function showPacketDetail(idx) {
+  const detail = $("pkt-detail");
+  detail.style.display = "block";
+  detail.innerHTML = '<div style="padding:8px;color:var(--text-dim);font-size:12px;">Loading packet detail...</div>';
+
   try {
     const p = await api("GET", `/api/session/${state.sid}/packet/${idx}`);
     state.selectedPacket = p;
-    const detail = $("pkt-detail");
-    detail.style.display = "block";
 
     let trackHtml = "";
     if (p.layers?.tcp) {
@@ -706,7 +749,7 @@ function renderHTTPList() {
       <td class="col-status ${statusClass}">${tx.status || "—"}</td>
       <td class="col-host">${escapeHtml(tx.host || "—")}</td>
       <td class="col-type">${escapeHtml(tx.contentType || "—")}</td>
-      <td class="col-pkts">${tx.packetIndices.length}</td>
+      <td class="col-pkts">${(tx.packetIndices || []).length}</td>
     `;
     tr.addEventListener("click", () => {
       selectedTxId = tx.id;
@@ -734,23 +777,24 @@ function showHTTPDetail(tx) {
   const reqBodySize = tx.requestBodyHex ? tx.requestBodyHex.length / 2 : 0;
   const respBodySize = tx.responseBodyHex ? tx.responseBodyHex.length / 2 : 0;
 
+  // Build action buttons using addEventListener instead of inline onclick with hex data
   const reqBodyActions = reqBodySize > 0
     ? `<div class="http-body-actions">
-        <button class="btn tiny" onclick="downloadHex('${tx.requestBodyHex}', 'request_body_${tx.id}.bin')">💾 保存</button>
-        <button class="btn tiny" onclick="copyHexText('${tx.requestBodyHex}')">📋 复制文本</button>
+        <button class="btn tiny http-save-req" data-tx-id="${tx.id}">💾 保存</button>
+        <button class="btn tiny http-copy-req" data-tx-id="${tx.id}">📋 复制文本</button>
        </div>`
     : "";
 
   const respBodyActions = respBodySize > 0
     ? `<div class="http-body-actions">
-        <button class="btn tiny" onclick="downloadHex('${tx.responseBodyHex}', 'response_body_${tx.id}.bin')">💾 保存</button>
-        <button class="btn tiny" onclick="copyHexText('${tx.responseBodyHex}')">📋 复制文本</button>
-        ${isTextContent(tx.contentType) ? `<button class="btn tiny" onclick="showBodyPreview(${tx.id}, 'response')">👁️ 预览</button>` : ""}
+        <button class="btn tiny http-save-resp" data-tx-id="${tx.id}">💾 保存</button>
+        <button class="btn tiny http-copy-resp" data-tx-id="${tx.id}">📋 复制文本</button>
+        ${isTextContent(tx.contentType) ? `<button class="btn tiny http-preview-resp" data-tx-id="${tx.id}">👁️ 预览</button>` : ""}
        </div>`
     : "";
 
   const packetLinks = (tx.packetIndices || []).map(idx =>
-    `<button class="btn tiny" onclick="viewPacket(${idx})">#${idx}</button>`
+    `<button class="btn tiny pkt-link-btn" data-idx="${idx}">#${idx}</button>`
   ).join(" ");
 
   // Build stream key for TCP stream tracking
@@ -762,7 +806,7 @@ function showHTTPDetail(tx) {
   const respCL = tx.responseHeaders ? Object.entries(tx.responseHeaders).find(([k]) => k.toLowerCase() === "content-length")?.[1] : null;
   const isChunked = !tx.responseBodyHex && respCL && parseInt(respCL) > 0;
   const chunkedNotice = isChunked
-    ? `<div class="http-chunked-notice">⚠️ 响应体被 TCP 分片（Content-Length: ${respCL} bytes）。<button class="btn tiny" onclick="showStream('${escapeHtml(streamKey)}')">🌊 跟踪 TCP 流查看完整数据</button></div>`
+    ? `<div class="http-chunked-notice">⚠️ 响应体被 TCP 分片（Content-Length: ${respCL} bytes）。<button class="btn tiny stream-link-btn" data-key="${escapeHtml(streamKey)}">🌊 跟踪 TCP 流查看完整数据</button></div>`
     : "";
 
   detail.innerHTML = `
@@ -773,7 +817,7 @@ function showHTTPDetail(tx) {
       </div>
       <div style="display:flex;gap:6px;align-items:center;">
         <span style="font-size:11px;color:var(--text-dim);">Packets: ${packetLinks}</span>
-        <button class="btn tiny" onclick="showStream('${escapeHtml(streamKey)}')">🌊 流</button>
+        <button class="btn tiny stream-link-btn" data-key="${escapeHtml(streamKey)}">🌊 流</button>
         <button class="btn tiny" id="http-detail-close">✕</button>
       </div>
     </div>
@@ -802,6 +846,30 @@ function showHTTPDetail(tx) {
     </div>
   `;
 
+  // Bind action buttons via addEventListener (avoids XSS from inline onclick with hex data)
+  const saveReqBtn = detail.querySelector(".http-save-req");
+  if (saveReqBtn) saveReqBtn.addEventListener("click", () => downloadHex(tx.requestBodyHex, `request_body_${tx.id}.bin`));
+
+  const copyReqBtn = detail.querySelector(".http-copy-req");
+  if (copyReqBtn) copyReqBtn.addEventListener("click", () => copyHexText(tx.requestBodyHex));
+
+  const saveRespBtn = detail.querySelector(".http-save-resp");
+  if (saveRespBtn) saveRespBtn.addEventListener("click", () => downloadHex(tx.responseBodyHex, `response_body_${tx.id}.bin`));
+
+  const copyRespBtn = detail.querySelector(".http-copy-resp");
+  if (copyRespBtn) copyRespBtn.addEventListener("click", () => copyHexText(tx.responseBodyHex));
+
+  const previewRespBtn = detail.querySelector(".http-preview-resp");
+  if (previewRespBtn) previewRespBtn.addEventListener("click", () => showBodyPreview(tx.id, "response"));
+
+  detail.querySelectorAll(".pkt-link-btn").forEach(btn => {
+    btn.addEventListener("click", () => viewPacket(parseInt(btn.dataset.idx)));
+  });
+
+  detail.querySelectorAll(".stream-link-btn").forEach(btn => {
+    btn.addEventListener("click", () => showStream(btn.dataset.key));
+  });
+
   $("http-detail-close")?.addEventListener("click", () => {
     detail.style.display = "none";
     selectedTxId = null;
@@ -815,19 +883,19 @@ function isTextContent(ct) {
   return t.includes("text/") || t.includes("json") || t.includes("xml") || t.includes("javascript") || t.includes("html");
 }
 
-window.copyHexText = function(hexStr) {
+function copyHexText(hexStr) {
   if (!hexStr) return;
-  const bytes = new Uint8Array(hexStr.match(/.{2}/g).map(b => parseInt(b, 16)));
+  const bytes = hexToBytes(hexStr);
   const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
   navigator.clipboard.writeText(text).then(() => log("Copied to clipboard", "success")).catch(() => log("Copy failed", "warn"));
-};
+}
 
-window.showBodyPreview = function(txId, which) {
+function showBodyPreview(txId, which) {
   const tx = httpTransactions.find(t => t.id === txId);
   if (!tx) return;
   const hexStr = which === "response" ? tx.responseBodyHex : tx.requestBodyHex;
   if (!hexStr) return;
-  const bytes = new Uint8Array(hexStr.match(/.{2}/g).map(b => parseInt(b, 16)));
+  const bytes = hexToBytes(hexStr);
   const ct = tx.contentType || "";
 
   // Try to show as image if content type suggests it
@@ -846,7 +914,7 @@ window.showBodyPreview = function(txId, which) {
 
   let contentHtml = "";
   if (mime && mime.startsWith("image/")) {
-    const b64 = btoa(String.fromCharCode(...bytes));
+    const b64 = bytesToBase64(bytes);
     contentHtml = `<img src="data:${mime};base64,${b64}" style="max-width:100%;max-height:400px;border-radius:4px;" alt="preview">`;
   } else {
     const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
@@ -859,14 +927,15 @@ window.showBodyPreview = function(txId, which) {
     <div class="modal-content" style="max-width:800px;max-height:80vh;overflow:auto;">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <strong>Body Preview</strong>
-        <button class="btn tiny" onclick="this.closest('.modal-overlay').remove()">✕</button>
+        <button class="btn tiny modal-close-btn">✕</button>
       </div>
       <div>${contentHtml}</div>
     </div>
   `;
   panel.addEventListener("click", e => { if (e.target === panel) panel.remove(); });
+  panel.querySelector(".modal-close-btn").addEventListener("click", () => panel.remove());
   document.body.appendChild(panel);
-};
+}
 
 function _streamKeyFromPacket(p) {
   const ip = p.layers?.ip;
@@ -890,7 +959,7 @@ function buildTreeHtml(p) {
     const off = layer._offset ?? 0;
     const len = layer._length ?? 0;
     html += `<div class="tree-node" data-offset="${off}" data-length="${len}">
-      <span class="tree-toggle">▾</span> <b>${name.toUpperCase()}</b>
+      <span class="tree-toggle">▾</span> <b>${escapeHtml(name.toUpperCase())}</b>
     </div>
     <div class="tree-children">`;
     for (const [k, v] of Object.entries(layer)) {
@@ -976,18 +1045,24 @@ async function showStream(key) {
     contentPanel.innerHTML = `
       <div class="panel-card"><h3>Stream: ${escapeHtml(key)}</h3>
       <div class="panel-row">
-        <button class="btn small" onclick="exportStreamText('${escapeHtml(key)}', 'ascii')">Export ASCII</button>
-        <button class="btn small" onclick="exportStreamText('${escapeHtml(key)}', 'hex')">Export Hex</button>
+        <button class="btn small" id="stream-export-ascii">Export ASCII</button>
+        <button class="btn small" id="stream-export-hex">Export Hex</button>
         <button class="btn small secondary" id="stream-back-btn">← 返回数据包列表</button>
       </div>
       <div id="stream-body" style="font-family:var(--font-mono);font-size:12px"></div></div>
     `;
+
     $("stream-back-btn")?.addEventListener("click", () => {
       state.currentTool = "packets";
       sidebar.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
-      sidebar.querySelector('[data-tool="packets"]').classList.add("active");
+      const navItem = sidebar.querySelector('[data-tool="packets"]');
+      if (navItem) navItem.classList.add("active");
       renderPackets();
     });
+
+    $("stream-export-ascii")?.addEventListener("click", () => exportStreamText(key, "ascii"));
+    $("stream-export-hex")?.addEventListener("click", () => exportStreamText(key, "hex"));
+
     const body = $("stream-body");
     let html = "";
     for (const seg of data.segments) {
@@ -1000,7 +1075,7 @@ async function showStream(key) {
   }
 }
 
-window.exportStreamText = function(key, fmt) {
+function exportStreamText(key, fmt) {
   api("GET", `/api/session/${state.sid}/stream/${encodeURIComponent(key)}`).then(data => {
     let text = "";
     for (const seg of data.segments) {
@@ -1011,8 +1086,10 @@ window.exportStreamText = function(key, fmt) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `stream_${fmt}.txt`; a.click(); URL.revokeObjectURL(url);
+  }).catch(err => {
+    log("Export failed: " + err.message, "danger");
   });
-};
+}
 
 /* ===================== STATS ===================== */
 async function renderStats() {
@@ -1118,7 +1195,7 @@ function renderFlagResult(data) {
 
   // Default rules info box
   html += `<div style="background:var(--bg-tertiary);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:12px;">
-    <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px;">📋 默认搜索规则（点击侧边栏“Flag 猎人”即自动使用以下规则）</div>
+    <div style="font-size:12px;font-weight:700;color:var(--accent);margin-bottom:6px;">📋 默认搜索规则（点击侧边栏"Flag 猎人"即自动使用以下规则）</div>
     <div style="display:flex;flex-wrap:wrap;gap:4px;">`;
   for (const [label, pat] of defaultRules) {
     html += `<span style="display:inline-block;padding:3px 8px;border-radius:4px;background:rgba(137,180,250,0.12);color:#89b4fa;font-size:11px;border:1px solid rgba(137,180,250,0.25);">${escapeHtml(label)}</span>`;
@@ -1136,7 +1213,7 @@ function renderFlagResult(data) {
       </select>
       <button class="btn" id="flag-search-btn">🔍 搜索</button>
     </div>
-    <div style="font-size:11px;color:var(--text-dim)">提示：直接点击侧边栏“Flag 猎人”使用内置规则；下方输入框可自定义正则或普通字符串搜索。</div>
+    <div style="font-size:11px;color:var(--text-dim)">提示：直接点击侧边栏"Flag 猎人"使用内置规则；下方输入框可自定义正则或普通字符串搜索。</div>
     <div style="display:flex;gap:8px;align-items:center;">
       <input type="text" id="flag-add-input" placeholder="添加常用字符串..." style="flex:1">
       <button class="btn tiny" id="flag-add-btn">➕ 添加</button>
@@ -1221,7 +1298,8 @@ function renderFlagResult(data) {
 async function viewPacket(idx) {
   state.currentTool = "packets";
   sidebar.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
-  sidebar.querySelector('[data-tool="packets"]').classList.add("active");
+  const navItem = sidebar.querySelector('[data-tool="packets"]');
+  if (navItem) navItem.classList.add("active");
   state.packetPage = Math.ceil(idx / state.packetSize);
   if (state.packetPage < 1) state.packetPage = 1;
   state.jumpPacketIdx = idx;
@@ -1425,8 +1503,9 @@ function renderFilesResult(data) {
       panel.style.display = "block";
       const mimeMap = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", ico: "image/x-icon" };
       const mime = mimeMap[f.type] || "application/octet-stream";
-      const bytes = new Uint8Array(f.hex.match(/.{2}/g).map(b => parseInt(b, 16)));
-      const b64 = btoa(String.fromCharCode(...bytes));
+      const hex = f.hex_preview || f.hex || "";
+      const bytes = hexToBytes(hex);
+      const b64 = bytesToBase64(bytes);
       content.innerHTML = `<img src="data:${mime};base64,${b64}" style="max-width:100%;max-height:380px;border-radius:4px;" alt="preview">`;
     });
   });
@@ -1453,7 +1532,8 @@ function renderFilesResult(data) {
       const idx = parseInt(btn.dataset.idx);
       const f = files[idx];
       const name = f.filename || `extracted_${idx}${f.ext}`;
-      downloadHex(f.hex, name);
+      const hex = f.hex_preview || f.hex || "";
+      downloadHex(hex, name);
     });
   });
 
@@ -1466,7 +1546,8 @@ function renderFilesResult(data) {
         const idx = parseInt(chk.dataset.idx);
         const f = files[idx];
         const name = f.filename || `extracted_${idx}${f.ext}`;
-        downloadHex(f.hex, name);
+        const hex = f.hex_preview || f.hex || "";
+        downloadHex(hex, name);
       });
       log(`Exported ${checked.length} file(s)`, "success");
     });
@@ -1477,7 +1558,7 @@ function renderFilesResult(data) {
     exportAllBtn.addEventListener("click", async () => {
       const checked = contentPanel.querySelectorAll(".file-check:checked");
       if (!checked.length) { log("No files selected", "warn"); return; }
-      if (typeof JSZip === "undefined") { log("JSZip not loaded", "error"); return; }
+      if (typeof JSZip === "undefined") { log("JSZip not loaded - check your internet connection or download the file individually", "error"); return; }
       showLoader(true);
       try {
         const zip = new JSZip();
@@ -1494,7 +1575,8 @@ function renderFilesResult(data) {
             name = `${base}_${n}${ext}`;
           }
           usedNames.add(name);
-          const bytes = new Uint8Array(f.hex.match(/.{2}/g).map(b => parseInt(b, 16)));
+          const hex = f.hex_preview || f.hex || "";
+          const bytes = hexToBytes(hex);
           zip.file(name, bytes);
         });
         const blob = await zip.generateAsync({ type: "blob" });
@@ -1516,7 +1598,7 @@ function renderFilesResult(data) {
 
 function downloadHex(hexStr, filename) {
   if (!hexStr) return;
-  const bytes = new Uint8Array(hexStr.match(/.{2}/g).map(b => parseInt(b, 16)));
+  const bytes = hexToBytes(hexStr);
   const blob = new Blob([bytes], { type: "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1623,7 +1705,7 @@ function renderWebshellResult(data) {
       html += `</div>`;
       html += `<div class="webshell-decrypt-controls">`;
       html += `<input type="text" class="webshell-key-input" placeholder="Enter custom key..." />`;
-      html += `<button class="btn btn-sm" onclick="retryWebshellDecrypt(${txId}, '', this)">🔁 Retry</button>`;
+      html += `<button class="btn btn-sm ws-retry-btn" data-tx-id="${txId}">🔁 Retry</button>`;
       html += `</div>`;
       html += `<div class="webshell-decrypt-results">`;
       for (const r of f.results) {
@@ -1639,19 +1721,25 @@ function renderWebshellResult(data) {
   }
   html += `</div>`;
 
+  // Bind retry buttons via addEventListener
+  contentPanel.innerHTML = html;
+  contentPanel.querySelectorAll(".ws-retry-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      retryWebshellDecrypt(parseInt(btn.dataset.txId), '', btn);
+    });
+  });
+
   // Supported types reference
   const supported = decrypt.supported_types || [];
   if (supported.length) {
-    html += `<div class="panel-card" style="margin-top:16px;"><h3>📋 Supported Decryption Types</h3>`;
-    html += `<table class="result-table"><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>`;
+    let supportedHtml = `<div class="panel-card" style="margin-top:16px;"><h3>📋 Supported Decryption Types</h3>`;
+    supportedHtml += `<table class="result-table"><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>`;
     for (const st of supported) {
-      html += `<tr><td>${escapeHtml(st.name)}</td><td>${escapeHtml(st.description)}</td></tr>`;
+      supportedHtml += `<tr><td>${escapeHtml(st.name)}</td><td>${escapeHtml(st.description)}</td></tr>`;
     }
-    html += `</tbody></table></div>`;
+    supportedHtml += `</tbody></table></div>`;
+    contentPanel.insertAdjacentHTML("beforeend", supportedHtml);
   }
-
-  html += `</div>`;
-  contentPanel.innerHTML = html;
 }
 
 function renderSqlResult(data) {
@@ -1672,9 +1760,9 @@ function renderSqlResult(data) {
 function renderPortscanResult(data) {
   let html = `<div class="panel-card"><h3>Port Scan Detection</h3>`;
   if (data.scan_targets && data.scan_targets.length) {
-    html += `<h4>🔍 Scan Targets</h4><table class="result-table"><thead><tr><th>Target</th><th>SYN Ports</th><th>Open Ports</th></tr></thead><tbody>`;
+    html += `<h4>🔍 Scan Targets</h4><table class="result-table"><thead><tr><th>Target</th><th>SYN Ports</th><th>RST Ports</th><th>Open Ports</th></tr></thead><tbody>`;
     for (const t of data.scan_targets) {
-      html += `<tr><td>${escapeHtml(t.target)}</td><td>${t.syn_ports}</td><td>${t.open_ports.join(", ") || "None"}</td></tr>`;
+      html += `<tr><td>${escapeHtml(t.target)}</td><td>${t.syn_ports}</td><td>${t.rst_ports || 0}</td><td>${t.open_ports.join(", ") || "None"}</td></tr>`;
     }
     html += `</tbody></table>`;
   } else {
@@ -1974,16 +2062,7 @@ async function restoreSession(sid, filename) {
     state.sid = sid;
     state.filename = filename || "";
     state.totalPackets = data.totalUnfiltered || 0;
-    state.packetPage = 1;
-    state.packetFilter = "";
-    state.sortKey = "";
-    state.sortDir = "asc";
-    state.timeMode = "absolute";
-    state.selectedPacketIdx = null;
-    state.jumpPacketIdx = null;
-    state.multiSelect.clear();
-    state.lastSelectedIdx = null;
-    state.detailCollapsed = false;
+    resetSessionState();
     loadBookmarks();
     dropZone.style.display = "none";
     workspace.style.display = "flex";
@@ -1994,9 +2073,7 @@ async function restoreSession(sid, filename) {
   } catch (err) {
     log(`Session expired for ${filename}, please re-upload`, "warn");
     clearCurrentSession();
-    // Remove from recent if session gone
     removeRecentFile(filename);
-    alert("会话已过期，服务器重启后需要重新上传文件。");
   } finally {
     showLoader(false);
   }
@@ -2017,16 +2094,7 @@ async function loadSession() {
     state.filename = filename;
     state.totalPackets = data.totalUnfiltered || 0;
     state.currentTool = tool;
-    state.packetPage = 1;
-    state.packetFilter = "";
-    state.sortKey = "";
-    state.sortDir = "asc";
-    state.timeMode = "absolute";
-    state.selectedPacketIdx = null;
-    state.jumpPacketIdx = null;
-    state.multiSelect.clear();
-    state.lastSelectedIdx = null;
-    state.detailCollapsed = false;
+    resetSessionState();
     loadBookmarks();
     dropZone.style.display = "none";
     workspace.style.display = "flex";

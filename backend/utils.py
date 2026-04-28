@@ -16,6 +16,13 @@ def bytes_to_ascii(data: bytes) -> str:
     return "".join(chr(b) if 32 <= b < 127 else "." for b in data)
 
 
+def safe_ascii(data: bytes) -> str:
+    """Printable ASCII with tab/newline/CR preserved, rest as dots."""
+    if not data:
+        return ""
+    return "".join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else "." for b in data)
+
+
 def safe_b64decode(s: str) -> bytes:
     try:
         return base64.b64decode(s)

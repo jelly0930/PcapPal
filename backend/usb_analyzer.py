@@ -1,5 +1,4 @@
 """USB HID traffic analyzer: keyboard and mouse."""
-import re
 from fastapi import FastAPI, HTTPException
 from backend.session import get_session
 
@@ -68,11 +67,6 @@ def analyze(session: dict) -> dict:
     mouse_streams = {}
 
     for p in packets:
-        proto = p.get("protocol", "")
-        if proto != "USB" and proto != "USBHID":
-            # Heuristic: check if payload looks like USB HID
-            pass
-
         # Try to find USB data in raw hex or payload
         raw = p.get("_raw", b"")
         hex_data = raw.hex() if raw else ""

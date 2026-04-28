@@ -1,7 +1,8 @@
 """PcapPal FastAPI backend."""
 import os
+import re
+import shutil
 import tempfile
-import time
 from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
@@ -9,8 +10,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel
 
-from backend.session import create_session, get_session, store_packets
+from backend.session import create_session, get_session, store_packets, rebuild_indexes
 from backend.parser import parse_pcap
+from backend.utils import safe_ascii
+
+ALLOWED_EXTENSIONS = {".pcap", ".pcapng", ".cap"}
 
 app = FastAPI(title="PcapPal", version="2.0")
 
@@ -25,10 +29,13 @@ def root():
 
 # ============== Upload ==============
 @app.post("/api/upload")
-def upload_file(file: UploadFile = File(...)):
-    suffix = os.path.splitext(file.filename or "")[1]
+async def upload_file(file: UploadFile = File(...)):
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {suffix}. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file.file.read())
+        shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
     sid = create_session()
@@ -126,7 +133,7 @@ def _ensure_hex_ascii(p: dict) -> dict:
     if "hex" not in p:
         raw = p.pop("_raw", b"")
         p["hex"] = raw.hex() if raw else ""
-        p["ascii"] = "".join(chr(b) if 32 <= b < 127 else "." for b in raw)
+        p["ascii"] = safe_ascii(raw)
     # Strip internal fields before returning to client
     p.pop("_raw", None)
     return p
@@ -147,10 +154,14 @@ def get_packet_detail(sid: str, idx: int):
 def _stream_key(pkt: dict) -> str:
     ip = pkt.get("layers", {}).get("ip", {})
     tcp = pkt.get("layers", {}).get("tcp", {})
-    if not ip or not tcp:
+    src = ip.get("src")
+    dst = ip.get("dst")
+    sport = tcp.get("sport")
+    dport = tcp.get("dport")
+    if not all([src, dst, sport is not None, dport is not None]):
         return ""
-    a = f"{ip['src']}:{tcp['sport']}"
-    b = f"{ip['dst']}:{tcp['dport']}"
+    a = f"{src}:{sport}"
+    b = f"{dst}:{dport}"
     return f"{min(a,b)} <-> {max(a,b)}"
 
 
@@ -215,13 +226,6 @@ def get_stream_content(sid: str, key: str):
 
 # ============== HTTP ==============
 
-def _safe_ascii(data: bytes) -> str:
-    if not data:
-        return ""
-    return "".join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else "." for b in data)
-
-
-import re
 _HTTP_START_RE = re.compile(br"(?:GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH|CONNECT|TRACE|HTTP/)")
 
 
@@ -255,7 +259,7 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
         return None
     # Strip leading nulls/spaces so HTTP start line is at position 0
     stripped = data.lstrip(b"\x00")
-    text = stripped[:2048].decode("utf-8", errors="ignore")
+    text = stripped[:4096].decode("utf-8", errors="ignore")
     lines = text.split("\r\n")
     if len(lines) < 2:
         lines = text.split("\n")
@@ -318,7 +322,6 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
         if cl and cl.isdigit():
             body_len = min(int(cl), len(body))
         else:
-            # Methods that typically have no body unless Content-Length is present
             if method in ("GET", "HEAD", "DELETE", "OPTIONS", "TRACE", "CONNECT"):
                 body_len = 0
             else:
@@ -331,7 +334,7 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
             "version": version,
             "headers": headers,
             "body_hex": actual_body.hex(),
-            "body_ascii": _safe_ascii(actual_body),
+            "body_ascii": safe_ascii(actual_body),
             "_consumed": header_end + body_len,
         }
     else:
@@ -352,16 +355,15 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
             "version": version,
             "headers": headers,
             "body_hex": actual_body.hex(),
-            "body_ascii": _safe_ascii(actual_body),
+            "body_ascii": safe_ascii(actual_body),
             "_consumed": header_end + body_len,
         }
 
 
-@app.get("/api/session/{sid}/http")
-def get_http_transactions(sid: str):
-    sess = get_session(sid)
-    if not sess:
-        raise HTTPException(status_code=404, detail="Session not found")
+def _get_http_transactions_cached(sess: dict) -> list:
+    """Compute and cache HTTP transactions for a session."""
+    if "http_transactions" in sess:
+        return sess["http_transactions"]
 
     packets = sess["packets"]
 
@@ -374,8 +376,14 @@ def get_http_transactions(sid: str):
         ip = p.get("layers", {}).get("ip", {})
         if not ip:
             continue
-        a = f"{ip['src']}:{tcp['sport']}"
-        b = f"{ip['dst']}:{tcp['dport']}"
+        a_src = ip.get("src")
+        a_dst = ip.get("dst")
+        a_sport = tcp.get("sport")
+        a_dport = tcp.get("dport")
+        if not all([a_src, a_dst, a_sport is not None, a_dport is not None]):
+            continue
+        a = f"{a_src}:{a_sport}"
+        b = f"{a_dst}:{a_dport}"
         key = f"{min(a,b)} <-> {max(a,b)}"
         if key not in streams:
             streams[key] = []
@@ -390,7 +398,7 @@ def get_http_transactions(sid: str):
         for p in stream_packets:
             tcp = p.get("layers", {}).get("tcp", {})
             ip = p.get("layers", {}).get("ip", {})
-            d = f"{ip['src']}:{tcp['sport']}->{ip['dst']}:{tcp['dport']}"
+            d = f"{ip.get('src','')}:{tcp.get('sport',0)}->{ip.get('dst','')}:{tcp.get('dport',0)}"
             if d not in dirs:
                 dirs[d] = []
             dirs[d].append(p)
@@ -442,7 +450,16 @@ def get_http_transactions(sid: str):
                 transactions.append(_finalize_tx_from_msg(tx_id, req, resp))
                 tx_id += 1
 
+    sess["http_transactions"] = transactions
     return transactions
+
+
+@app.get("/api/session/{sid}/http")
+def get_http_transactions(sid: str):
+    sess = get_session(sid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _get_http_transactions_cached(sess)
 
 
 def _finalize_tx_from_msg(tx_id: int, req_msg: Optional[Dict], resp_msg: Optional[Dict]) -> Dict[str, Any]:
@@ -507,73 +524,6 @@ def _finalize_tx_from_msg(tx_id: int, req_msg: Optional[Dict], resp_msg: Optiona
     if resp_msg:
         indices.extend(resp_msg.get("_packetIndices", []))
     tx["packetIndices"] = list(dict.fromkeys(indices))  # dedup while preserving order
-    return tx
-
-
-def _finalize_tx(tx_id: int, req_seg: Optional[Dict], resp_seg: Optional[Dict]) -> Dict[str, Any]:
-    tx: Dict[str, Any] = {"id": tx_id}
-    if req_seg:
-        req = req_seg["http"]
-        tx["src"] = req_seg["src"]
-        tx["dst"] = req_seg["dst"]
-        tx["srcPort"] = req_seg["srcPort"]
-        tx["dstPort"] = req_seg["dstPort"]
-        tx["method"] = req.get("method", "")
-        tx["uri"] = req.get("uri", "")
-        tx["host"] = req.get("headers", {}).get("Host", "")
-        tx["requestHeaders"] = req.get("headers", {})
-        tx["requestBody"] = req.get("body_ascii", "")[:2048]
-        tx["requestBodyHex"] = req.get("body_hex", "")
-        tx["timestamp"] = req_seg["timestamp"]
-        tx["requestIndex"] = req_seg["index"]
-    else:
-        tx["src"] = resp_seg["src"] if resp_seg else ""
-        tx["dst"] = resp_seg["dst"] if resp_seg else ""
-        tx["srcPort"] = resp_seg["srcPort"] if resp_seg else 0
-        tx["dstPort"] = resp_seg["dstPort"] if resp_seg else 0
-        tx["method"] = ""
-        tx["uri"] = ""
-        tx["host"] = ""
-        tx["requestHeaders"] = {}
-        tx["requestBody"] = ""
-        tx["requestBodyHex"] = ""
-        tx["timestamp"] = resp_seg["timestamp"] if resp_seg else 0.0
-        tx["requestIndex"] = None
-
-    if resp_seg:
-        resp = resp_seg["http"]
-        tx["status"] = resp.get("status", 0)
-        tx["statusText"] = resp.get("statusText", "")
-        tx["responseHeaders"] = resp.get("headers", {})
-        # Content-Type header case-insensitive lookup
-        headers = resp.get("headers", {})
-        ct = ""
-        for k, v in headers.items():
-            if k.lower() == "content-type":
-                ct = v
-                break
-        tx["contentType"] = ct
-        tx["responseBody"] = resp.get("body_ascii", "")[:2048]
-        tx["responseBodyHex"] = resp.get("body_hex", "")
-        tx["responseBodyRaw"] = resp.get("body_hex", "")
-        tx["responseIndex"] = resp_seg["index"]
-    else:
-        tx["status"] = 0
-        tx["statusText"] = ""
-        tx["responseHeaders"] = {}
-        tx["contentType"] = ""
-        tx["responseBody"] = ""
-        tx["responseBodyHex"] = ""
-        tx["responseBodyRaw"] = ""
-        tx["responseIndex"] = None
-
-    # Collect all packet indices involved
-    indices = []
-    if req_seg:
-        indices.append(req_seg["index"])
-    if resp_seg:
-        indices.append(resp_seg["index"])
-    tx["packetIndices"] = indices
     return tx
 
 
@@ -645,8 +595,6 @@ if hasattr(webshell_decryptor, "register"):
 
 # ============== TLS Decryption ==============
 import subprocess
-import tempfile
-import shutil
 
 
 @app.post("/api/session/{sid}/sslkeylog")
@@ -656,23 +604,19 @@ async def upload_sslkeylog(sid: str, file: UploadFile = File(...)):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    if sess.get("decrypted"):
+        raise HTTPException(status_code=400, detail="Session already decrypted. Re-upload the original pcap to decrypt with a different key.")
+
     # Check if tshark is available
     if not shutil.which("tshark"):
         raise HTTPException(status_code=500, detail="tshark not found. Please install Wireshark/tshark.")
 
     # Save keylog file
-    suffix = ".txt"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, mode="wb") as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", mode="wb") as tmp:
         content = await file.read()
         tmp.write(content)
         keylog_path = tmp.name
 
-    # We need to re-read the original pcap to decrypt it.
-    # Since we don't keep the original pcap after upload, we have two options:
-    # 1. Reconstruct pcap from parsed packets (lossy)
-    # 2. Keep original pcap in session
-    # Let's add original_pcap_path to session storage.
-    # For now, we check if session has original path stored.
     original_path = sess.get("original_path")
     if not original_path or not os.path.exists(original_path):
         os.unlink(keylog_path)
@@ -707,8 +651,11 @@ async def upload_sslkeylog(sid: str, file: UploadFile = File(...)):
             else:
                 p["delta"] = round(p["timestamp"] - new_packets[i - 1]["timestamp"], 6)
         sess["packets"] = new_packets
+        rebuild_indexes(sess)
         sess["decrypted"] = True
         sess["sslkeylog"] = True
+        # Invalidate cached HTTP transactions
+        sess.pop("http_transactions", None)
         # Cleanup
         os.unlink(keylog_path)
         os.unlink(decrypted_path)

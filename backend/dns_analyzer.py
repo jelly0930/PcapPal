@@ -4,13 +4,7 @@ import re
 from typing import Dict, List
 from fastapi import FastAPI, HTTPException
 from backend.session import get_session
-
-# DNS record type mapping
-DNS_TYPE_MAP = {
-    1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR",
-    15: "MX", 16: "TXT", 28: "AAAA", 33: "SRV", 255: "ANY",
-    48: "DNSKEY", 43: "DS", 46: "RRSIG", 257: "CAA",
-}
+from backend.parser import DNS_TYPE_NAMES
 
 
 def _decode_base32_subdomain(name: str) -> str:
@@ -52,7 +46,7 @@ def analyze(session: dict) -> dict:
             for q in dns.get("queries", []):
                 name = q.get("name", "").rstrip(".")
                 qtype = q.get("type")
-                qtype_str = DNS_TYPE_MAP.get(qtype, f"TYPE{qtype}") if qtype else "?"
+                qtype_str = DNS_TYPE_NAMES.get(qtype, f"TYPE{qtype}") if qtype else "?"
                 queries.append({"index": p["index"], "name": name, "type": qtype, "typeStr": qtype_str})
                 # Domain stats
                 domain_stats[name] = domain_stats.get(name, 0) + 1
@@ -73,7 +67,7 @@ def analyze(session: dict) -> dict:
             for a in dns.get("answers", []):
                 name = a.get("name", "").rstrip(".")
                 atype = a.get("type")
-                atype_str = DNS_TYPE_MAP.get(atype, f"TYPE{atype}") if atype else "?"
+                atype_str = DNS_TYPE_NAMES.get(atype, f"TYPE{atype}") if atype else "?"
                 data = a.get("data", "")
                 # Try to extract meaningful TXT data
                 txt_data = ""

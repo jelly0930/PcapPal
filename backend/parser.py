@@ -6,17 +6,12 @@ from scapy.layers.inet6 import ICMPv6EchoRequest
 from scapy.utils import PcapReader, PcapNgReader
 import os
 import binascii
-import base64
+
+from backend.utils import safe_ascii, bytes_to_hex
 
 
 def _get_hex(data: bytes) -> str:
     return binascii.hexlify(data).decode() if data else ""
-
-
-def _safe_ascii(data: bytes) -> str:
-    if not data:
-        return ""
-    return "".join(chr(b) if 32 <= b < 127 or b in (9, 10, 13) else "." for b in data)
 
 
 def _layer_offset(raw_all: bytes, layer_bytes: bytes) -> int:
@@ -168,7 +163,7 @@ def parse_pcap(path: str) -> List[Dict[str, Any]]:
                 "id": icmp.id if hasattr(icmp, "id") else None,
                 "seq": icmp.seq if hasattr(icmp, "seq") else None,
                 "payload_hex": _get_hex(payload),
-                "payload_ascii": _safe_ascii(payload),
+                "payload_ascii": safe_ascii(payload),
                 "_offset": off if off >= 0 else 0,
                 "_length": len(icmp_bytes),
             }
@@ -197,7 +192,7 @@ def parse_pcap(path: str) -> List[Dict[str, Any]]:
             payload = bytes(tcp.payload) if tcp.payload else b""
             if payload:
                 entry["layers"]["tcp"]["payload_hex"] = _get_hex(payload)
-                entry["layers"]["tcp"]["payload_ascii"] = _safe_ascii(payload)
+                entry["layers"]["tcp"]["payload_ascii"] = safe_ascii(payload)
 
             # HTTP detection
             http_info = _parse_http(payload)
@@ -229,7 +224,7 @@ def parse_pcap(path: str) -> List[Dict[str, Any]]:
             payload = bytes(udp.payload) if udp.payload else b""
             if payload:
                 entry["layers"]["udp"]["payload_hex"] = _get_hex(payload)
-                entry["layers"]["udp"]["payload_ascii"] = _safe_ascii(payload)
+                entry["layers"]["udp"]["payload_ascii"] = safe_ascii(payload)
 
             if pkt.haslayer(DNS):
                 dns = pkt[DNS]
@@ -279,14 +274,12 @@ def _parse_http(payload: bytes) -> Optional[Dict[str, Any]]:
         return None
 
     headers = {}
-    i = 1
     for line in lines[1:]:
         if line == "":
             break
         if ":" in line:
             k, v = line.split(":", 1)
             headers[k.strip()] = v.strip()
-        i += 1
 
     body = b""
     if b"\r\n\r\n" in payload:
@@ -302,7 +295,7 @@ def _parse_http(payload: bytes) -> Optional[Dict[str, Any]]:
             "version": req_match["version"],
             "headers": headers,
             "body_hex": _get_hex(body),
-            "body_ascii": _safe_ascii(body),
+            "body_ascii": safe_ascii(body),
             "summary": f"{req_match['method']} {req_match['uri']} HTTP/{req_match['version']}",
         }
     else:
@@ -313,7 +306,7 @@ def _parse_http(payload: bytes) -> Optional[Dict[str, Any]]:
             "version": resp_match["version"],
             "headers": headers,
             "body_hex": _get_hex(body),
-            "body_ascii": _safe_ascii(body),
+            "body_ascii": safe_ascii(body),
             "summary": f"HTTP/{resp_match['version']} {resp_match['status']} {resp_match['statusText']}",
         }
 
@@ -338,8 +331,8 @@ def _dns_info(dns) -> str:
         return f"DNS Response ({dns.ancount} answers)"
 
 
-# DNS record type names for display
-_DNS_TYPE_NAMES = {
+# DNS record type names for display (shared with dns_analyzer)
+DNS_TYPE_NAMES = {
     1: "A", 2: "NS", 5: "CNAME", 6: "SOA", 12: "PTR",
     15: "MX", 16: "TXT", 28: "AAAA", 33: "SRV", 255: "ANY",
     48: "DNSKEY", 43: "DS", 46: "RRSIG", 257: "CAA",
@@ -359,7 +352,7 @@ def _parse_dns(dns) -> Dict[str, Any]:
                 queries.append({
                     "name": qname,
                     "type": qtype,
-                    "typeStr": _DNS_TYPE_NAMES.get(qtype, f"TYPE{qtype}"),
+                    "typeStr": DNS_TYPE_NAMES.get(qtype, f"TYPE{qtype}"),
                 })
     if dns.ancount and dns.ancount > 0 and dns.an:
         an_list = dns.an if isinstance(dns.an, list) else [dns.an]
@@ -385,7 +378,7 @@ def _parse_dns(dns) -> Dict[str, Any]:
                 answers.append({
                     "name": rrname,
                     "type": atype,
-                    "typeStr": _DNS_TYPE_NAMES.get(atype, f"TYPE{atype}"),
+                    "typeStr": DNS_TYPE_NAMES.get(atype, f"TYPE{atype}"),
                     "data": data_val,
                     "raw": bytes(a.payload).hex() if a.payload else "",
                 })
