@@ -4,7 +4,18 @@
 
 ## 功能特性
 
+界面展示
+
+* Flag 猎人
+
+![image-20260429141130222](./.img/README/image-20260429141130222.png)
+
+* HTTP 分析
+
+![image-20260429141441120](./.img/README/image-20260429141441120.png)
+
 ### 基础分析
+
 - **协议识别**：Ethernet、IPv4/IPv6、TCP、UDP、ICMP、HTTP、DNS、TLS、ARP
 - **数据包列表**：Wireshark 风格表格，支持分页与协议过滤
 - **TCP 流追踪**：自动重组流，支持 ASCII/Hex 导出
