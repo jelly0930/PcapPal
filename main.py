@@ -234,6 +234,51 @@ def _find_next_http_start(data: bytes) -> int:
     return m.start() if m else -1
 
 
+def _header_get(headers: dict, name: str, default: str = "") -> str:
+    """Case-insensitive header lookup."""
+    name_lower = name.lower()
+    for k, v in headers.items():
+        if k.lower() == name_lower:
+            return v
+    return default
+
+
+def _decode_chunked(data: bytes) -> tuple:
+    """Decode HTTP chunked transfer-encoding body.
+    Returns (decoded_body, consumed_bytes) where consumed_bytes includes
+    the terminating 0\\r\\n\\r\\n trailer."""
+    result = bytearray()
+    offset = 0
+    while offset < len(data):
+        # Find chunk size line
+        crlf = data.find(b"\r\n", offset)
+        if crlf < 0:
+            break
+        size_str = data[offset:crlf].decode("ascii", errors="ignore").split(";")[0].strip()
+        try:
+            chunk_size = int(size_str, 16)
+        except ValueError:
+            break
+        if chunk_size == 0:
+            # Terminal chunk — skip 0\r\n and any trailers until \r\n
+            end_of_trailer = data.find(b"\r\n", crlf + 2)
+            if end_of_trailer >= 0:
+                offset = end_of_trailer + 2
+            else:
+                offset = len(data)
+            break
+        chunk_start = crlf + 2
+        chunk_end = chunk_start + chunk_size
+        if chunk_end > len(data):
+            result.extend(data[chunk_start:])
+            offset = len(data)
+            break
+        result.extend(data[chunk_start:chunk_end])
+        # Skip trailing CRLF after chunk data
+        offset = chunk_end + 2
+    return bytes(result), offset
+
+
 def _parse_http_messages(data: bytes) -> List[Dict[str, Any]]:
     """Parse all HTTP request/response messages from reassembled TCP data."""
     messages = []
@@ -259,7 +304,38 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
         return None
     # Strip leading nulls/spaces so HTTP start line is at position 0
     stripped = data.lstrip(b"\x00")
-    text = stripped[:4096].decode("utf-8", errors="ignore")
+    leading_nulls = len(data) - len(stripped)
+
+    # If stripping nulls corrupted the start line (e.g. \x00\x00HTTP -> TTP),
+    # look for the HTTP start directly in the raw data and realign
+    if stripped and not stripped.startswith((b"GET ", b"POST ", b"PUT ", b"DELETE ",
+                                             b"HEAD ", b"OPTIONS ", b"PATCH ", b"CONNECT ",
+                                             b"TRACE ", b"HTTP/")):
+        m = _HTTP_START_RE.search(stripped)
+        if m and m.start() > 0:
+            # The null bytes consumed part of the actual HTTP start line.
+            # Recalculate: the real start was at leading_nulls - m.start()
+            # but simpler: just skip the garbage in stripped
+            leading_nulls += m.start()
+            stripped = stripped[m.start():]
+
+    # Find header end in raw bytes (no size limit — headers can be very large)
+    sep_idx = stripped.find(b"\r\n\r\n")
+    if sep_idx >= 0:
+        header_end_bytes = sep_idx + 4  # past the \r\n\r\n
+    else:
+        sep_idx = stripped.find(b"\n\n")
+        if sep_idx >= 0:
+            header_end_bytes = sep_idx + 2
+        else:
+            header_end_bytes = -1
+
+    if header_end_bytes == -1:
+        return None
+
+    # Decode only the header portion for parsing
+    header_raw = stripped[:sep_idx]
+    text = header_raw.decode("utf-8", errors="ignore")
     lines = text.split("\r\n")
     if len(lines) < 2:
         lines = text.split("\n")
@@ -291,42 +367,36 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
     if not is_req and not is_resp:
         return None
 
-    # Find header end in stripped data
-    header_end = -1
-    for i in range(len(text) - 3):
-        if text[i:i+4] == "\r\n\r\n":
-            header_end = i + 4
-            break
-        elif text[i:i+2] == "\n\n" and header_end == -1:
-            header_end = i + 2
-
-    if header_end == -1:
-        return None
-
-    # Adjust header_end to be relative to original data
-    leading_nulls = len(data) - len(stripped)
-    header_end += leading_nulls
-
     # Parse headers
     headers = {}
-    header_text = text[:header_end - leading_nulls]
-    for line in header_text.split("\r\n")[1:]:
+    for line in lines[1:]:
+        if line == "":
+            break
         if ":" in line:
             k, v = line.split(":", 1)
             headers[k.strip()] = v.strip()
 
+    # header_end relative to original data (includes leading nulls)
+    header_end = header_end_bytes + leading_nulls
+
     body = data[header_end:]
+    is_chunked = _header_get(headers, "Transfer-Encoding", "").lower() == "chunked"
 
     if is_req:
-        cl = headers.get("Content-Length", "")
-        if cl and cl.isdigit():
-            body_len = min(int(cl), len(body))
+        if is_chunked:
+            actual_body, chunk_consumed = _decode_chunked(body)
+            consumed = chunk_consumed
         else:
-            if method in ("GET", "HEAD", "DELETE", "OPTIONS", "TRACE", "CONNECT"):
-                body_len = 0
+            cl = _header_get(headers, "Content-Length")
+            if cl and cl.isdigit():
+                body_len = min(int(cl), len(body))
             else:
-                body_len = len(body)
-        actual_body = body[:body_len]
+                if method in ("GET", "HEAD", "DELETE", "OPTIONS", "TRACE", "CONNECT"):
+                    body_len = 0
+                else:
+                    body_len = len(body)
+            actual_body = body[:body_len]
+            consumed = body_len
         return {
             "isRequest": True,
             "method": method,
@@ -335,19 +405,31 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
             "headers": headers,
             "body_hex": actual_body.hex(),
             "body_ascii": safe_ascii(actual_body),
-            "_consumed": header_end + body_len,
+            "_consumed": header_end + consumed,
+            "chunked": is_chunked,
         }
     else:
         # No body for 1xx, 204 No Content, 304 Not Modified
         if status in (100, 101, 204, 304):
             body_len = 0
+            actual_body = b""
+            consumed = 0
+        elif is_chunked:
+            actual_body, chunk_consumed = _decode_chunked(body)
+            consumed = chunk_consumed
         else:
-            cl = headers.get("Content-Length", "")
+            cl = _header_get(headers, "Content-Length")
             if cl and cl.isdigit():
                 body_len = min(int(cl), len(body))
             else:
-                body_len = len(body)
-        actual_body = body[:body_len]
+                # No Content-Length: look for next HTTP message to limit body
+                next_start = _find_next_http_start(body)
+                if next_start > 0:
+                    body_len = next_start
+                else:
+                    body_len = len(body)
+            actual_body = body[:body_len]
+            consumed = body_len
         return {
             "isRequest": False,
             "status": status,
@@ -356,8 +438,77 @@ def _parse_single_http(data: bytes) -> Optional[Dict[str, Any]]:
             "headers": headers,
             "body_hex": actual_body.hex(),
             "body_ascii": safe_ascii(actual_body),
-            "_consumed": header_end + body_len,
+            "_consumed": header_end + consumed,
+            "chunked": is_chunked,
         }
+
+
+def _is_spurious_payload(tcph: dict, payload: bytes) -> bool:
+    """Filter out bogus TCP payloads that Scapy mis-parses from options/padding."""
+    if not payload:
+        return True
+    flags = tcph.get("flags", "")
+    # SYN / SYN+ACK packets never carry application data
+    if "S" in flags and "A" not in flags:  # SYN only
+        return True
+    # Pure-null payloads <= 6 bytes are almost always TCP option padding
+    if len(payload) <= 6 and payload == b"\x00" * len(payload):
+        return True
+    # SYN+ACK with any payload — the payload is always bogus
+    if "S" in flags and "A" in flags:
+        return True
+    return False
+
+
+def _reassemble_direction(dpackets: List[Dict]) -> bytes:
+    """Reassemble one direction of a TCP stream, handling retransmissions
+    and filtering spurious payloads."""
+    has_seq = all(
+        p.get("layers", {}).get("tcp", {}).get("seq") is not None
+        for p in dpackets
+    )
+    if has_seq:
+        # Build seq -> (payload, pkt_index) keeping the longest payload per seq
+        seq_segments: Dict[int, tuple] = {}
+        for p in dpackets:
+            tcph = p.get("layers", {}).get("tcp", {})
+            payload_hex = tcph.get("payload_hex", "")
+            payload = bytes.fromhex(payload_hex) if payload_hex else b""
+            if _is_spurious_payload(tcph, payload):
+                continue
+            seq = tcph.get("seq", 0)
+            if seq not in seq_segments or len(payload) > len(seq_segments[seq][0]):
+                seq_segments[seq] = (payload, p["index"])
+
+        # Reassemble in seq order, skipping bytes already covered
+        sorted_seqs = sorted(seq_segments.keys())
+        reassembled = bytearray()
+        covered_end: Optional[int] = None
+        for seq in sorted_seqs:
+            payload = seq_segments[seq][0]
+            if covered_end is None:
+                reassembled.extend(payload)
+                covered_end = seq + len(payload)
+            elif seq >= covered_end:
+                reassembled.extend(payload)
+                covered_end = seq + len(payload)
+            elif seq + len(payload) > covered_end:
+                overlap = covered_end - seq
+                if overlap < len(payload):
+                    reassembled.extend(payload[overlap:])
+                    covered_end = seq + len(payload)
+        return bytes(reassembled)
+    else:
+        dpackets.sort(key=lambda p: p["timestamp"])
+        parts = []
+        for p in dpackets:
+            tcph = p.get("layers", {}).get("tcp", {})
+            payload_hex = tcph.get("payload_hex", "")
+            payload = bytes.fromhex(payload_hex) if payload_hex else b""
+            if _is_spurious_payload(tcph, payload):
+                continue
+            parts.append(payload)
+        return b"".join(parts)
 
 
 def _get_http_transactions_cached(sess: dict) -> list:
@@ -406,48 +557,75 @@ def _get_http_transactions_cached(sess: dict) -> list:
         # Reassemble each direction and parse HTTP
         all_messages: List[Dict] = []
         for d, dpackets in dirs.items():
-            has_seq = all(
-                p.get("layers", {}).get("tcp", {}).get("seq") is not None
-                for p in dpackets
-            )
-            if has_seq:
-                dpackets.sort(key=lambda p: p.get("layers", {}).get("tcp", {}).get("seq", 0))
-            else:
-                dpackets.sort(key=lambda p: p["timestamp"])
-
-            data = b"".join(
-                bytes.fromhex(p.get("layers", {}).get("tcp", {}).get("payload_hex", ""))
-                for p in dpackets
-            )
-            if not data:
+            # Find the first packet with real payload for accurate timestamp
+            first_payload_pkt = None
+            for p in dpackets:
+                tcph = p.get("layers", {}).get("tcp", {})
+                payload_hex = tcph.get("payload_hex", "")
+                payload = bytes.fromhex(payload_hex) if payload_hex else b""
+                if not _is_spurious_payload(tcph, payload) and len(payload) > 0:
+                    first_payload_pkt = p
+                    break
+            if first_payload_pkt is None:
+                # No real payload in this direction
                 continue
 
-            first_pkt = dpackets[0]
-            tcp = first_pkt.get("layers", {}).get("tcp", {})
-            ip = first_pkt.get("layers", {}).get("ip", {})
+            # Get src/dst from the first payload packet (correct direction)
+            iph = first_payload_pkt.get("layers", {}).get("ip", {})
+            tcph = first_payload_pkt.get("layers", {}).get("tcp", {})
+
+            data = _reassemble_direction(dpackets)
+            if not data:
+                continue
 
             msgs = _parse_http_messages(data)
             for msg in msgs:
                 msg["_direction"] = d
                 msg["_streamKey"] = key
                 msg["_packetIndices"] = [p["index"] for p in dpackets]
-                msg["_timestamp"] = first_pkt["timestamp"]
-                msg["_src"] = first_pkt.get("src", "")
-                msg["_dst"] = first_pkt.get("dst", "")
-                msg["_sport"] = tcp.get("sport", 0)
-                msg["_dport"] = tcp.get("dport", 0)
+                msg["_timestamp"] = first_payload_pkt["timestamp"]
+                msg["_src"] = iph.get("src", "")
+                msg["_dst"] = iph.get("dst", "")
+                msg["_sport"] = tcph.get("sport", 0)
+                msg["_dport"] = tcph.get("dport", 0)
                 all_messages.append(msg)
+
+        # Sort all messages by timestamp for correct temporal ordering
+        all_messages.sort(key=lambda m: m.get("_timestamp", 0))
 
         # Separate requests and responses
         reqs = [m for m in all_messages if m.get("isRequest")]
         resps = [m for m in all_messages if not m.get("isRequest")]
 
-        # Pair by order within the stream (HTTP/1.1 without pipelining is strictly alternating)
-        for i in range(max(len(reqs), len(resps))):
-            req = reqs[i] if i < len(reqs) else None
-            resp = resps[i] if i < len(resps) else None
-            if req or resp:
-                transactions.append(_finalize_tx_from_msg(tx_id, req, resp))
+        # Pair requests and responses using timestamp proximity.
+        # For each request, find the closest response within a generous window.
+        # Allow responses to be slightly before the request (SYN+ACK arrives
+        # before the request payload is fully sent).
+        used_resps = set()
+        for req in reqs:
+            req_ts = req.get("_timestamp", 0)
+            best_resp = None
+            best_idx = -1
+            best_dt = float("inf")
+            for j, resp in enumerate(resps):
+                if j in used_resps:
+                    continue
+                dt = abs(resp.get("_timestamp", 0) - req_ts)
+                if dt < best_dt:
+                    best_dt = dt
+                    best_resp = resp
+                    best_idx = j
+            if best_resp is not None and best_dt < 30:  # within 30 seconds
+                used_resps.add(best_idx)
+            else:
+                best_resp = None
+            transactions.append(_finalize_tx_from_msg(tx_id, req, best_resp))
+            tx_id += 1
+
+        # Add unmatched responses
+        for j, resp in enumerate(resps):
+            if j not in used_resps:
+                transactions.append(_finalize_tx_from_msg(tx_id, None, resp))
                 tx_id += 1
 
     sess["http_transactions"] = transactions
@@ -473,7 +651,7 @@ def _finalize_tx_from_msg(tx_id: int, req_msg: Optional[Dict], resp_msg: Optiona
         tx["dstPort"] = req_msg.get("_dport", 0)
         tx["method"] = req_msg.get("method", "")
         tx["uri"] = req_msg.get("uri", "")
-        tx["host"] = req_msg.get("headers", {}).get("Host", "")
+        tx["host"] = _header_get(req_msg.get("headers", {}), "Host")
         tx["requestHeaders"] = req_msg.get("headers", {})
         tx["requestBody"] = req_msg.get("body_ascii", "")[:65536]
         tx["requestBodyHex"] = req_msg.get("body_hex", "")

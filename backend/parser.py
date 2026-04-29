@@ -245,14 +245,61 @@ def parse_pcap(path: str) -> List[Dict[str, Any]]:
             entry["info"] = f"IP Protocol {proto_num}"
 
         result.append(entry)
+
+    # Second pass: mark TCP continuation packets on HTTP streams as HTTP
+    _mark_http_continuations(result)
+
     return result
+
+
+_HTTP_PORTS = {80, 8080, 8443, 8000, 8888, 3000, 5000, 443}
+
+
+def _mark_http_continuations(packets: List[Dict]) -> None:
+    """Mark TCP packets carrying HTTP body data as HTTP if they belong to an HTTP stream."""
+    # Collect streams that have at least one HTTP packet
+    http_streams = set()
+    for p in packets:
+        if p.get("protocol") == "HTTP" and "tcp" in p.get("layers", {}):
+            tcph = p["layers"]["tcp"]
+            iph = p.get("layers", {}).get("ip", {})
+            src = iph.get("src", "")
+            dst = iph.get("dst", "")
+            sport = tcph.get("sport", 0)
+            dport = tcph.get("dport", 0)
+            a = f"{src}:{sport}"
+            b = f"{dst}:{dport}"
+            key = f"{min(a,b)} <-> {max(a,b)}"
+            http_streams.add(key)
+
+    # Mark TCP packets on those streams that have payload but aren't already HTTP
+    for p in packets:
+        if p.get("protocol") != "TCP":
+            continue
+        layers = p.get("layers", {})
+        if "tcp" not in layers:
+            continue
+        tcph = layers["tcp"]
+        if not tcph.get("payload_hex"):
+            continue
+        iph = layers.get("ip", {})
+        src = iph.get("src", "")
+        dst = iph.get("dst", "")
+        sport = tcph.get("sport", 0)
+        dport = tcph.get("dport", 0)
+        a = f"{src}:{sport}"
+        b = f"{dst}:{dport}"
+        key = f"{min(a,b)} <-> {max(a,b)}"
+        if key in http_streams:
+            p["protocol"] = "HTTP"
+            p["info"] = f"{sport} -> {dport} [HTTP continuation]"
 
 
 def _parse_http(payload: bytes) -> Optional[Dict[str, Any]]:
     if not payload or len(payload) < 16:
         return None
     try:
-        text = payload[:512].decode("utf-8", errors="ignore")
+        text = payload[:4096].decode("utf-8", errors="ignore")
     except Exception:
         return None
     lines = text.split("\r\n")
