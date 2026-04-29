@@ -12,3 +12,4 @@ venv/
 dist/
 build/
 .claude/
+*.pcapng:Zone.Identifier
