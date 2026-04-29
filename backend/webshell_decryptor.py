@@ -712,3 +712,75 @@ def register(app):
             "key": ws_info.get("key", ""),
             "results": result.get("results", []),
         }
+
+    @app.post("/api/session/{sid}/webshell/decrypt/{tx_id}/manual")
+    def post_webshell_manual_decrypt(sid: str, tx_id: int, body: dict = None):
+        """Manual webshell decryption: user specifies type and key, bypassing auto-detection."""
+        if body is None:
+            body = {}
+        ws_type = body.get("type", "auto")
+        ws_key = body.get("key", "")
+        ws_param = body.get("param", "")  # optional: specific param name
+
+        sess = get_session(sid)
+        if not sess:
+            raise HTTPException(status_code=404, detail="Session not found")
+        import main
+        transactions = main._get_http_transactions_cached(sess)
+        tx = None
+        for t in transactions:
+            if t.get("id") == tx_id:
+                tx = t
+                break
+        if not tx:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+
+        req_body = tx.get("requestBody", "") or ""
+
+        if ws_type == "auto":
+            # Try all rules, return the best result from each
+            results = []
+            for rid, rule in WEBSHELL_DECRYPT_RULES.items():
+                if rid == "generic":
+                    continue
+                ws_info = {"type": rid, "type_name": rule["name"], "key": ws_key}
+                dec_result = decrypt_transaction(tx, ws_info)
+                if dec_result.get("results"):
+                    results.append({
+                        "type": rid,
+                        "type_name": rule["name"],
+                        "key": ws_key,
+                        "results": dec_result["results"],
+                    })
+            # Also try generic
+            if not results:
+                ws_info = {"type": "generic", "type_name": "Generic", "key": ws_key}
+                dec_result = decrypt_transaction(tx, ws_info)
+                if dec_result.get("results"):
+                    results.append({
+                        "type": "generic",
+                        "type_name": "Generic",
+                        "key": ws_key,
+                        "results": dec_result["results"],
+                    })
+            return {
+                "transaction_id": tx_id,
+                "mode": "auto",
+                "attempts": results,
+            }
+
+        # Specific type
+        rule = WEBSHELL_DECRYPT_RULES.get(ws_type)
+        if not rule:
+            raise HTTPException(status_code=400, detail=f"Unknown webshell type: {ws_type}. Available: {', '.join(WEBSHELL_DECRYPT_RULES.keys())}")
+
+        ws_info = {"type": ws_type, "type_name": rule["name"], "key": ws_key}
+        result = decrypt_transaction(tx, ws_info)
+        return {
+            "transaction_id": tx_id,
+            "mode": "manual",
+            "type": ws_type,
+            "type_name": rule["name"],
+            "key": ws_key,
+            "results": result.get("results", []),
+        }

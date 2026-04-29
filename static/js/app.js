@@ -85,6 +85,7 @@ function resetSessionState() {
   state.multiSelect.clear();
   state.lastSelectedIdx = null;
   state.detailCollapsed = false;
+  webshellScanMap = {};
 }
 
 function formatTime(ts) {
@@ -667,6 +668,7 @@ async function showPacketDetail(idx) {
 let httpTransactions = [];
 let httpFilter = "";
 let selectedTxId = null;
+let webshellScanMap = {};  // txId -> finding (populated after scan)
 
 async function renderHTTP() {
   contentPanel.innerHTML = `
@@ -675,6 +677,8 @@ async function renderHTTP() {
         <input type="text" id="http-filter" placeholder="过滤 URL / Host / Method / Status..." value="${escapeHtml(httpFilter)}" style="flex:1">
         <button class="btn" id="http-filter-btn">🔍 过滤</button>
         <button class="btn secondary" id="http-clear-btn">清除</button>
+        <button class="btn ws-scan-btn" id="http-ws-scan-btn" style="margin-left:8px;">🐚 扫描 Webshell</button>
+        <span id="http-ws-scan-count" class="ws-scan-count"></span>
         <span id="http-count" style="margin-left:8px;font-size:12px;color:var(--text-dim);"></span>
       </div>
       <div class="http-list-wrap" style="flex:1;overflow:auto;border:1px solid var(--border);border-radius:6px;">
@@ -708,11 +712,45 @@ async function renderHTTP() {
     }
   });
 
+  $("http-ws-scan-btn").addEventListener("click", () => scanWebshellInHTTP());
+
+  // Restore badge count if scan results exist
+  if (Object.keys(webshellScanMap).length > 0) {
+    const cnt = Object.keys(webshellScanMap).length;
+    $("http-ws-scan-count").textContent = `${cnt} 个可疑`;
+  }
+
   try {
     httpTransactions = await api("GET", `/api/session/${state.sid}/http`);
     renderHTTPList();
   } catch (err) {
     log("HTTP error: " + err.message, "danger");
+  }
+}
+
+async function scanWebshellInHTTP() {
+  const btn = $("http-ws-scan-btn");
+  if (!btn) return;
+  btn.disabled = true;
+  btn.textContent = "扫描中...";
+  showLoader(true);
+  try {
+    const data = await api("GET", `/api/session/${state.sid}/webshell/decrypt`);
+    webshellScanMap = {};
+    for (const f of data.findings || []) {
+      webshellScanMap[f.transaction_id] = f;
+    }
+    const cnt = Object.keys(webshellScanMap).length;
+    const countEl = $("http-ws-scan-count");
+    if (countEl) countEl.textContent = cnt > 0 ? `${cnt} 个可疑` : "无异常";
+    renderHTTPList();
+    log(`Webshell scan: ${cnt} suspicious transaction(s)`, cnt > 0 ? "warn" : "success");
+  } catch (err) {
+    log("Webshell scan failed: " + err.message, "danger");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🐚 扫描 Webshell";
+    showLoader(false);
   }
 }
 
@@ -743,9 +781,13 @@ function renderHTTPList() {
   for (const tx of txs) {
     const tr = document.createElement("tr");
     const statusClass = tx.status >= 400 ? "status-err" : tx.status >= 300 ? "status-redirect" : tx.status >= 200 ? "status-ok" : "";
+    const wsFinding = webshellScanMap[tx.id];
+    const wsBadges = wsFinding
+      ? `<span class="ws-badge decrypt" title="${escapeHtml(wsFinding.type_name || wsFinding.type)} - 点击查看解密结果">${escapeHtml(wsFinding.type_name || wsFinding.type)}</span>`
+      : "";
     tr.innerHTML = `
       <td class="col-method"><span class="http-method">${escapeHtml(tx.method || "—")}</span></td>
-      <td class="col-url" title="${escapeHtml(tx.uri)}">${escapeHtml(tx.uri || "—")}</td>
+      <td class="col-url" title="${escapeHtml(tx.uri)}">${escapeHtml(tx.uri || "—")}${wsBadges}</td>
       <td class="col-status ${statusClass}">${tx.status || "—"}</td>
       <td class="col-host">${escapeHtml(tx.host || "—")}</td>
       <td class="col-type">${escapeHtml(tx.contentType || "—")}</td>
@@ -760,6 +802,16 @@ function renderHTTPList() {
     });
     tbody.appendChild(tr);
   }
+}
+
+function _renderDecryptResult(r) {
+  return `<div class="http-ws-result">
+    <div class="http-ws-param">Param: <b>${escapeHtml(r.param)}</b> <span style="color:var(--text-dim)">${r.original_len} chars → ${r.decrypted_len} chars</span></div>
+    <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Original:</div>
+    <div class="http-ws-orig">${escapeHtml(r.original)}</div>
+    <div style="font-size:11px;color:var(--success);margin-bottom:2px;">Decrypted:</div>
+    <div class="http-ws-dec">${escapeHtml(r.decrypted)}</div>
+  </div>`;
 }
 
 function showHTTPDetail(tx) {
@@ -809,6 +861,56 @@ function showHTTPDetail(tx) {
     ? `<div class="http-chunked-notice">⚠️ 响应体被 TCP 分片（Content-Length: ${respCL} bytes）。<button class="btn tiny stream-link-btn" data-key="${escapeHtml(streamKey)}">🌊 跟踪 TCP 流查看完整数据</button></div>`
     : "";
 
+  // Webshell decryption section (auto-scan results)
+  const wsFinding = webshellScanMap[tx.id];
+  let wsSectionHtml = "";
+  if (wsFinding) {
+    wsSectionHtml = `<div class="http-ws-section">
+      <div class="http-ws-header">
+        <span class="ws-type-tag">${escapeHtml(wsFinding.type_name || wsFinding.type)}</span>
+        <span>Webshell 解密结果</span>
+        ${wsFinding.key ? `<span class="ws-key-tag">Key: <code>${escapeHtml(wsFinding.key)}</code></span>` : ""}
+      </div>
+      <div class="http-ws-body">`;
+    for (const r of wsFinding.results || []) {
+      wsSectionHtml += `<div class="http-ws-result">
+        <div class="http-ws-param">Param: <b>${escapeHtml(r.param)}</b> <span style="color:var(--text-dim)">${r.original_len} chars → ${r.decrypted_len} chars</span></div>
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Original:</div>
+        <div class="http-ws-orig">${escapeHtml(r.original)}</div>
+        <div style="font-size:11px;color:var(--success);margin-bottom:2px;">Decrypted:</div>
+        <div class="http-ws-dec">${escapeHtml(r.decrypted)}</div>
+      </div>`;
+    }
+    wsSectionHtml += `</div></div>`;
+  }
+
+  // Manual decrypt section (always available)
+  wsSectionHtml += `<div class="http-ws-section" style="border-color:rgba(137,180,250,0.3);">
+    <div class="http-ws-header" style="background:rgba(137,180,250,0.08);border-bottom-color:rgba(137,180,250,0.2);">
+      <span class="ws-type-tag" style="background:#89b4fa;">手动解密</span>
+      <span>指定 Webshell 类型与密钥手动解密流量</span>
+    </div>
+    <div class="http-ws-body">
+      <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+        <label style="font-size:12px;white-space:nowrap;">类型:</label>
+        <select class="http-ws-type-select" style="flex:1;min-width:140px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text-primary);font-size:12px;">
+          <option value="auto">自动检测</option>
+          <option value="asp_bypass">ASP Bypass (Base64+XOR)</option>
+          <option value="jspx_aes">JSPX AES (AES/ECB)</option>
+          <option value="jspx_eval">JSPX Eval (Hex ASP)</option>
+          <option value="php_eval_base64">PHP Eval+Base64</option>
+          <option value="php_simple_eval">PHP Simple Eval</option>
+          <option value="php_simple_base64">PHP Simple Base64</option>
+          <option value="php_xor">PHP XOR</option>
+          <option value="generic">Generic (Base64/Hex/XOR)</option>
+        </select>
+        <input type="text" class="http-ws-manual-key" placeholder="密钥 (可选)" style="flex:1;min-width:120px;background:var(--bg-primary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text-primary);font-family:var(--font-mono);font-size:12px;">
+        <button class="btn tiny http-ws-manual-btn" data-tx-id="${tx.id}">🔓 解密</button>
+      </div>
+      <div class="http-ws-manual-results"></div>
+    </div>
+  </div>`;
+
   detail.innerHTML = `
     <div class="http-detail-header">
       <div style="display:flex;gap:8px;align-items:center;">
@@ -844,6 +946,7 @@ function showHTTPDetail(tx) {
         </div>
       </div>
     </div>
+    ${wsSectionHtml}
   `;
 
   // Bind action buttons via addEventListener (avoids XSS from inline onclick with hex data)
@@ -869,6 +972,70 @@ function showHTTPDetail(tx) {
   detail.querySelectorAll(".stream-link-btn").forEach(btn => {
     btn.addEventListener("click", () => showStream(btn.dataset.key));
   });
+
+  // Manual webshell decrypt
+  const wsManualBtn = detail.querySelector(".http-ws-manual-btn");
+  if (wsManualBtn) {
+    wsManualBtn.addEventListener("click", async () => {
+      const txId = parseInt(wsManualBtn.dataset.txId);
+      const typeSelect = detail.querySelector(".http-ws-type-select");
+      const keyInput = detail.querySelector(".http-ws-manual-key");
+      const resultsDiv = detail.querySelector(".http-ws-manual-results");
+      const wsType = typeSelect ? typeSelect.value : "auto";
+      const wsKey = keyInput ? keyInput.value.trim() : "";
+      wsManualBtn.disabled = true;
+      wsManualBtn.textContent = "解密中...";
+      try {
+        const data = await api("POST", `/api/session/${state.sid}/webshell/decrypt/${txId}/manual`, { type: wsType, key: wsKey });
+        if (!resultsDiv) return;
+
+        if (data.mode === "auto") {
+          // Auto mode: try all types
+          const attempts = data.attempts || [];
+          if (!attempts.length) {
+            resultsDiv.innerHTML = '<div class="empty" style="padding:8px;font-size:12px;">自动检测未找到可解密的 payload</div>';
+            return;
+          }
+          let html = "";
+          for (const att of attempts) {
+            html += `<div style="margin-bottom:10px;">
+              <div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;">
+                ${escapeHtml(att.type_name)} <span style="color:var(--text-dim);font-weight:400;">(${att.type})</span>
+                ${att.key ? `<span style="color:var(--danger);margin-left:8px;">Key: ${escapeHtml(att.key)}</span>` : ""}
+              </div>`;
+            for (const r of att.results) {
+              html += _renderDecryptResult(r);
+            }
+            html += `</div>`;
+          }
+          resultsDiv.innerHTML = html;
+          log(`TX #${txId} 自动解密: ${attempts.length} 种类型匹配`, "success");
+        } else {
+          // Specific type
+          const results = data.results || [];
+          if (!results.length) {
+            resultsDiv.innerHTML = '<div class="empty" style="padding:8px;font-size:12px;">该类型无解密结果，请尝试其他类型或密钥</div>';
+            log(`${data.type_name} 无解密结果`, "warn");
+            return;
+          }
+          let html = `<div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;">
+            ${escapeHtml(data.type_name)} ${data.key ? `<span style="color:var(--danger);margin-left:8px;">Key: ${escapeHtml(data.key)}</span>` : ""}
+          </div>`;
+          for (const r of results) {
+            html += _renderDecryptResult(r);
+          }
+          resultsDiv.innerHTML = html;
+          log(`TX #${txId} ${data.type_name} 解密成功`, "success");
+        }
+      } catch (err) {
+        log("手动解密失败: " + err.message, "danger");
+        if (resultsDiv) resultsDiv.innerHTML = `<div class="empty" style="padding:8px;font-size:12px;color:var(--danger);">${escapeHtml(err.message)}</div>`;
+      } finally {
+        wsManualBtn.disabled = false;
+        wsManualBtn.textContent = "🔓 解密";
+      }
+    });
+  }
 
   $("http-detail-close")?.addEventListener("click", () => {
     detail.style.display = "none";
@@ -1671,7 +1838,37 @@ async function retryWebshellDecrypt(txId, key, btn) {
 }
 
 function renderWebshellResult(data) {
-  let html = `<div class="panel-card"><h3>🐚 Webshell Detection</h3>
+  // Manual decrypt section (always shown at top)
+  let html = `<div class="panel-card">
+    <h3>🔓 手动解密 Webshell 流量</h3>
+    <p class="panel-desc">手动选择 HTTP 事务、指定 Webshell 类型和密钥进行解密。自动检测不一定准确，可在此手动尝试。</p>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+      <label style="font-size:12px;white-space:nowrap;">HTTP 事务:</label>
+      <select id="ws-manual-tx" style="flex:2;min-width:200px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text-primary);font-size:12px;">
+        <option value="">-- 选择事务 --</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px;">
+      <label style="font-size:12px;white-space:nowrap;">类型:</label>
+      <select id="ws-manual-type" style="flex:1;min-width:140px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text-primary);font-size:12px;">
+        <option value="auto">自动检测</option>
+        <option value="asp_bypass">ASP Bypass (Base64+XOR)</option>
+        <option value="jspx_aes">JSPX AES (AES/ECB)</option>
+        <option value="jspx_eval">JSPX Eval (Hex ASP)</option>
+        <option value="php_eval_base64">PHP Eval+Base64</option>
+        <option value="php_simple_eval">PHP Simple Eval</option>
+        <option value="php_simple_base64">PHP Simple Base64</option>
+        <option value="php_xor">PHP XOR</option>
+        <option value="generic">Generic (Base64/Hex/XOR)</option>
+      </select>
+      <input type="text" id="ws-manual-key" placeholder="密钥 (可选)" style="flex:1;min-width:120px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;padding:4px 8px;color:var(--text-primary);font-family:var(--font-mono);font-size:12px;">
+      <button class="btn" id="ws-manual-btn">🔓 解密</button>
+    </div>
+    <div id="ws-manual-results"></div>
+  </div>`;
+
+  // Auto detection results
+  html += `<div class="panel-card" style="margin-top:16px;"><h3>🐚 自动检测结果</h3>
     <p class="panel-desc">Found ${data.count} suspicious requests</p>`;
   if (!data.matches || !data.matches.length) { html += '<div class="empty">No webshell traffic detected</div>'; }
   else {
@@ -1685,7 +1882,7 @@ function renderWebshellResult(data) {
   // Decryption results
   const decrypt = data.decrypt || {};
   const findings = decrypt.findings || [];
-  html += `<div class="panel-card" style="margin-top:16px;"><h3>🔓 Webshell Decryption</h3>`;
+  html += `<div class="panel-card" style="margin-top:16px;"><h3>🔓 自动解密结果</h3>`;
   html += `<p class="panel-desc">Found ${findings.length} decryptable payloads</p>`;
 
   if (!findings.length) {
@@ -1729,10 +1926,97 @@ function renderWebshellResult(data) {
     });
   });
 
+  // Populate HTTP transaction dropdown
+  const txSelect = $("ws-manual-tx");
+  if (txSelect && httpTransactions.length) {
+    for (const tx of httpTransactions) {
+      const label = `#${tx.id} ${tx.method || "?"} ${tx.uri || "?"} (${tx.host || ""})`;
+      const opt = document.createElement("option");
+      opt.value = tx.id;
+      opt.textContent = label.length > 80 ? label.slice(0, 80) + "..." : label;
+      txSelect.appendChild(opt);
+    }
+  } else if (txSelect) {
+    // Fetch HTTP transactions if not yet loaded
+    api("GET", `/api/session/${state.sid}/http`).then(txs => {
+      httpTransactions = txs;
+      for (const tx of txs) {
+        const label = `#${tx.id} ${tx.method || "?"} ${tx.uri || "?"} (${tx.host || ""})`;
+        const opt = document.createElement("option");
+        opt.value = tx.id;
+        opt.textContent = label.length > 80 ? label.slice(0, 80) + "..." : label;
+        txSelect.appendChild(opt);
+      }
+    }).catch(() => {});
+  }
+
+  // Manual decrypt button
+  const manualBtn = $("ws-manual-btn");
+  if (manualBtn) {
+    manualBtn.addEventListener("click", async () => {
+      const txId = txSelect ? parseInt(txSelect.value) : null;
+      const wsType = $("ws-manual-type") ? $("ws-manual-type").value : "auto";
+      const wsKey = $("ws-manual-key") ? $("ws-manual-key").value.trim() : "";
+      const resultsDiv = $("ws-manual-results");
+      if (!txId || isNaN(txId)) { log("请选择 HTTP 事务", "warn"); return; }
+      manualBtn.disabled = true;
+      manualBtn.textContent = "解密中...";
+      try {
+        const data = await api("POST", `/api/session/${state.sid}/webshell/decrypt/${txId}/manual`, { type: wsType, key: wsKey });
+        if (!resultsDiv) return;
+
+        if (data.mode === "auto") {
+          const attempts = data.attempts || [];
+          if (!attempts.length) {
+            resultsDiv.innerHTML = '<div class="empty" style="padding:8px;font-size:12px;">自动检测未找到可解密的 payload，请尝试手动指定类型</div>';
+            return;
+          }
+          let rHtml = "";
+          for (const att of attempts) {
+            rHtml += `<div style="margin-bottom:10px;padding:8px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border);">
+              <div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;">
+                ${escapeHtml(att.type_name)} <span style="color:var(--text-dim);font-weight:400;">(${att.type})</span>
+                ${att.key ? `<span style="color:var(--danger);margin-left:8px;">Key: ${escapeHtml(att.key)}</span>` : ""}
+              </div>`;
+            for (const r of att.results) {
+              rHtml += _renderDecryptResult(r);
+            }
+            rHtml += `</div>`;
+          }
+          resultsDiv.innerHTML = rHtml;
+          log(`TX #${txId} 自动解密: ${attempts.length} 种类型匹配`, "success");
+        } else {
+          const results = data.results || [];
+          if (!results.length) {
+            resultsDiv.innerHTML = '<div class="empty" style="padding:8px;font-size:12px;">该类型无解密结果，请尝试其他类型或密钥</div>';
+            log(`${data.type_name} 无解密结果`, "warn");
+            return;
+          }
+          let rHtml = `<div style="padding:8px;background:var(--bg-secondary);border-radius:6px;border:1px solid var(--border);">
+            <div style="font-size:11px;font-weight:600;color:var(--accent);margin-bottom:4px;">
+              ${escapeHtml(data.type_name)} ${data.key ? `<span style="color:var(--danger);margin-left:8px;">Key: ${escapeHtml(data.key)}</span>` : ""}
+            </div>`;
+          for (const r of results) {
+            rHtml += _renderDecryptResult(r);
+          }
+          rHtml += `</div>`;
+          resultsDiv.innerHTML = rHtml;
+          log(`TX #${txId} ${data.type_name} 解密成功`, "success");
+        }
+      } catch (err) {
+        log("手动解密失败: " + err.message, "danger");
+        if (resultsDiv) resultsDiv.innerHTML = `<div class="empty" style="padding:8px;font-size:12px;color:var(--danger);">${escapeHtml(err.message)}</div>`;
+      } finally {
+        manualBtn.disabled = false;
+        manualBtn.textContent = "🔓 解密";
+      }
+    });
+  }
+
   // Supported types reference
-  const supported = decrypt.supported_types || [];
+  const supported = (data.decrypt || {}).supported_types || [];
   if (supported.length) {
-    let supportedHtml = `<div class="panel-card" style="margin-top:16px;"><h3>📋 Supported Decryption Types</h3>`;
+    let supportedHtml = `<div class="panel-card" style="margin-top:16px;"><h3>📋 支持的解密类型</h3>`;
     supportedHtml += `<table class="result-table"><thead><tr><th>Type</th><th>Description</th></tr></thead><tbody>`;
     for (const st of supported) {
       supportedHtml += `<tr><td>${escapeHtml(st.name)}</td><td>${escapeHtml(st.description)}</td></tr>`;
