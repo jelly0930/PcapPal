@@ -581,6 +581,46 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
 }
 
 /* Webshell decryption */
+.ws-decrypt-result {
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.ws-decrypt-result:last-child { border-bottom: none; }
+.ws-decrypt-param { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+.ws-decrypt-pre {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow: auto;
+  margin: 4px 0 8px 0;
+}
+.ws-copy-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.2s;
+  line-height: 1.4;
+}
+.ws-copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.ws-copy-btn.copied {
+  border-color: var(--success);
+  color: var(--success);
+  background: rgba(166, 218, 149, 0.1);
+}
 .webshell-decrypt-card {
   background: var(--bg-primary);
   border: 1px solid var(--border);
@@ -685,6 +725,71 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   background: rgba(166, 218, 149, 0.06);
   border-color: rgba(166, 218, 149, 0.2);
 }
+/* HTTP 事务原始包预览 */
+.ws-tx-preview {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.ws-tx-preview-col {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ws-tx-preview-head {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-tx-preview-body {
+  max-height: 300px;
+  overflow: auto;
+}
+.ws-tx-preview-body pre {
+  margin: 0;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  line-height: 1.5;
+}
+/* 解密结果对比布局 */
+.ws-compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 8px;
+}
+.ws-compare-col {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ws-compare-head {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ws-compare-body {
+  max-height: 500px;
+  overflow: auto;
+}
+@media (max-width: 800px) {
+  .ws-tx-preview { grid-template-columns: 1fr; }
+  .ws-compare-grid { grid-template-columns: 1fr; }
+}
 .btn-sm {
   padding: 4px 10px;
   font-size: 12px;
@@ -702,91 +807,6 @@ input:focus, select:focus, textarea:focus { outline: none; border-color: var(--a
   opacity: 0.5;
   cursor: not-allowed;
 }
-
-/* Webshell badge in HTTP list */
-.ws-badge {
-  display: inline-block;
-  padding: 1px 6px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  margin-left: 4px;
-  cursor: pointer;
-  vertical-align: middle;
-  border: 1px solid transparent;
-}
-.ws-badge:hover { opacity: 0.85; }
-.ws-badge.detect { background: rgba(250, 179, 135, 0.18); color: #fab387; border-color: rgba(250, 179, 135, 0.35); }
-.ws-badge.decrypt { background: rgba(166, 218, 149, 0.18); color: #a6e3a1; border-color: rgba(166, 218, 149, 0.35); }
-
-.ws-scan-btn { white-space: nowrap; }
-.ws-scan-count { font-size: 11px; color: var(--warn); margin-left: 4px; }
-
-/* Inline webshell decryption in HTTP detail */
-.http-ws-section {
-  margin-top: 12px;
-  border: 1px solid rgba(166, 218, 149, 0.3);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.http-ws-header {
-  background: rgba(166, 218, 149, 0.08);
-  border-bottom: 1px solid rgba(166, 218, 149, 0.2);
-  padding: 8px 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 12px;
-}
-.http-ws-header .ws-type-tag {
-  background: var(--accent);
-  color: var(--bg-primary);
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-weight: 600;
-  font-size: 11px;
-}
-.http-ws-header .ws-key-tag {
-  color: var(--danger);
-  font-family: var(--font-mono);
-  font-size: 11px;
-}
-.http-ws-body { padding: 10px 12px; }
-.http-ws-result { margin-bottom: 10px; }
-.http-ws-result:last-child { margin-bottom: 0; }
-.http-ws-param { font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
-.http-ws-orig, .http-ws-dec {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 6px 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 150px;
-  overflow: auto;
-  margin: 4px 0;
-}
-.http-ws-dec {
-  background: rgba(166, 218, 149, 0.06);
-  border-color: rgba(166, 218, 149, 0.2);
-}
-.http-ws-controls {
-  display: flex; gap: 8px; align-items: center; margin-top: 8px;
-}
-.http-ws-controls input {
-  flex: 1;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 8px;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-.http-ws-controls input:focus { outline: none; border-color: var(--accent); }
 
 /* Responsive */
 @media (max-width: 768px) {
