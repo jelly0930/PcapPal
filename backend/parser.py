@@ -429,6 +429,12 @@ def _parse_dns(dns) -> Dict[str, Any]:
                     "data": data_val,
                     "raw": bytes(a.payload).hex() if a.payload else "",
                 })
+    # Extract trailing data after standard DNS structure (hidden data in malformed packets)
+    trailing = bytes(dns.payload) if dns.payload else b""
+    if trailing:
+        result["trailing_hex"] = trailing.hex()
+        result["trailing_ascii"] = safe_ascii(trailing)
+
     result["queries"] = queries
     result["answers"] = answers
     return result

@@ -223,6 +223,13 @@ async function uploadFile(file) {
     addToRecentFiles(data.filename, data.session_id);
     renderRecentFiles();
     renderCurrentTool();
+    // Cache file to IndexedDB for re-upload after server restart
+    try {
+      const buf = await file.arrayBuffer();
+      await saveFileToCache(file.name, buf);
+    } catch (e) {
+      console.warn("Failed to cache file:", e);
+    }
   } catch (err) {
     log("Upload failed: " + err.message, "danger");
     setStatus("Upload failed");
@@ -1369,13 +1376,43 @@ function renderIcmpResult(data) {
 }
 
 function renderDnsResult(data) {
-  let html = `<div class="panel-card"><h3>🌐 DNS Analysis</h3>
-    <p class="panel-desc">${data.queryCount} queries, ${data.answerCount} answers</p>`;
+  let html = `<div class="panel-card"><h3>🌐 DNS 分析</h3>
+    <p class="panel-desc">${data.queryCount} 个查询, ${data.answerCount} 个响应</p>`;
+
+  // Possible Flags (from trailing hidden data)
+  if (data.possibleFlags && data.possibleFlags.length) {
+    html += `<h4 style="color:var(--success)">🚩 检测到可疑 Flag</h4>`;
+    for (const f of data.possibleFlags) {
+      html += `<div class="flag-result" style="font-size:15px;font-weight:700;color:var(--success);">${escapeHtml(f)}</div>`;
+    }
+  }
+
+  // Decoded hex ASCII from trailing data
+  if (data.decodedHexAscii) {
+    html += `<h4 style="color:var(--accent)">🔓 解码隐藏数据 (Hex → ASCII)</h4>
+      <pre class="ascii-pre" style="background:var(--bg-tertiary);padding:8px;border-radius:4px">${escapeHtml(data.decodedHexAscii)}</pre>`;
+  }
+
+  // Trailing hidden raw concatenation
+  if (data.trailingConcat) {
+    html += `<h4 style="color:var(--accent)">📝 原始隐藏数据拼接</h4>
+      <pre class="ascii-pre" style="background:var(--bg-tertiary);padding:8px;border-radius:4px;word-break:break-all;">${escapeHtml(data.trailingConcat)}</pre>`;
+  }
+
+  // Trailing hidden per-packet details
+  if (data.trailingHidden && data.trailingHidden.length) {
+    html += `<h4 style="color:var(--warn)">🕵️ 逐包尾部隐藏数据 (${data.trailingHidden.length})</h4>
+      <table class="result-table"><thead><tr><th>序号</th><th>ASCII</th><th>Hex</th></tr></thead><tbody>`;
+    for (const t of data.trailingHidden) {
+      html += `<tr><td>${t.index}</td><td style="word-break:break-all;font-family:monospace;">${escapeHtml(t.ascii)}</td><td style="word-break:break-all;font-family:monospace;">${escapeHtml(t.hex)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
 
   // TXT Records
   if (data.txtRecords && data.txtRecords.length) {
-    html += `<h4 style="color:var(--success)">📜 TXT Records (${data.txtRecords.length})</h4>`;
-    html += `<table class="result-table"><thead><tr><th>#</th><th>Name</th><th>Data</th></tr></thead><tbody>`;
+    html += `<h4 style="color:var(--success)">📜 TXT 记录 (${data.txtRecords.length})</h4>`;
+    html += `<table class="result-table"><thead><tr><th>序号</th><th>域名</th><th>数据</th></tr></thead><tbody>`;
     for (const t of data.txtRecords) {
       html += `<tr><td>${t.index}</td><td>${escapeHtml(t.name)}</td><td style="word-break:break-all;">${escapeHtml(t.data)}</td></tr>`;
     }
@@ -1384,7 +1421,7 @@ function renderDnsResult(data) {
 
   // Base32 decoded
   if (data.base32Decoded && data.base32Decoded.length) {
-    html += `<h4 style="color:var(--success)">🔓 Base32 Decoded</h4>`;
+    html += `<h4 style="color:var(--success)">🔓 Base32 解码</h4>`;
     for (const d of data.base32Decoded) {
       html += `<div class="flag-result"><b>${escapeHtml(d.name)}</b> → <span style="color:var(--success)">${escapeHtml(d.decoded)}</span></div>`;
     }
@@ -1392,13 +1429,13 @@ function renderDnsResult(data) {
 
   // Subdomain length ASCII
   if (data.subdomainLengthAscii) {
-    html += `<h4 style="color:var(--accent)">📏 Subdomain Length → ASCII</h4>
+    html += `<h4 style="color:var(--accent)">📏 子域名长度 → ASCII</h4>
       <pre class="ascii-pre" style="background:var(--bg-tertiary);padding:8px;border-radius:4px">${escapeHtml(data.subdomainLengthAscii)}</pre>`;
   }
 
   // Suspicious
   if (data.suspicious && data.suspicious.length) {
-    html += `<h4 style="color:var(--warn)">⚠️ Suspicious (Possible Tunneling)</h4><table class="result-table"><thead><tr><th>#</th><th>Domain</th><th>Reason</th><th>Len</th></tr></thead><tbody>`;
+    html += `<h4 style="color:var(--warn)">⚠️ 可疑 (疑似隧道)</h4><table class="result-table"><thead><tr><th>序号</th><th>域名</th><th>原因</th><th>长度</th></tr></thead><tbody>`;
     for (const s of data.suspicious) {
       html += `<tr><td>${s.index}</td><td style="word-break:break-all;">${escapeHtml(s.name)}</td><td>${escapeHtml(s.reason)}</td><td>${s.length}</td></tr>`;
     }
@@ -1407,20 +1444,20 @@ function renderDnsResult(data) {
 
   // Top domains
   if (data.topDomains && data.topDomains.length) {
-    html += `<h4>📊 Top Domains</h4><table class="result-table"><thead><tr><th>Domain</th><th>Count</th></tr></thead><tbody>`;
+    html += `<h4>📊 Top 域名</h4><table class="result-table"><thead><tr><th>域名</th><th>次数</th></tr></thead><tbody>`;
     for (const [name, count] of data.topDomains) {
       html += `<tr><td style="word-break:break-all;">${escapeHtml(name)}</td><td>${count}</td></tr>`;
     }
     html += `</tbody></table>`;
   }
 
-  html += `<h4>Queries</h4><table class="result-table"><thead><tr><th>#</th><th>Name</th><th>Type</th></tr></thead><tbody>`;
+  html += `<h4>DNS 查询</h4><table class="result-table"><thead><tr><th>序号</th><th>域名</th><th>类型</th></tr></thead><tbody>`;
   for (const q of (data.queries || []).slice(0, 100)) {
     html += `<tr><td>${q.index}</td><td style="word-break:break-all;">${escapeHtml(q.name)}</td><td>${q.typeStr || q.type}</td></tr>`;
   }
   html += `</tbody></table>`;
 
-  html += `<h4>Answers</h4><table class="result-table"><thead><tr><th>#</th><th>Name</th><th>Type</th><th>Data</th></tr></thead><tbody>`;
+  html += `<h4>DNS 响应</h4><table class="result-table"><thead><tr><th>序号</th><th>域名</th><th>类型</th><th>数据</th></tr></thead><tbody>`;
   for (const a of (data.answers || []).slice(0, 100)) {
     html += `<tr><td>${a.index}</td><td style="word-break:break-all;">${escapeHtml(a.name)}</td><td>${a.typeStr || a.type}</td><td style="word-break:break-all;">${escapeHtml(String(a.data))}</td></tr>`;
   }
@@ -2338,6 +2375,70 @@ function clearCurrentSession() {
   localStorage.removeItem("pcappal_current_tool");
 }
 
+/* ===================== IndexedDB File Cache ===================== */
+const DB_NAME = "PcapPalDB";
+const DB_VERSION = 1;
+const STORE_NAME = "cachedFiles";
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+  });
+}
+
+async function saveFileToCache(filename, arrayBuffer) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    store.put({ filename, content: arrayBuffer, timestamp: Date.now() }, filename);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    console.warn("IndexedDB cache failed:", e);
+  }
+}
+
+async function getFileFromCache(filename) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.get(filename);
+    return new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (e) {
+    return null;
+  }
+}
+
+async function removeFileFromCache(filename) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    store.delete(filename);
+    return new Promise((resolve, reject) => {
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) {
+    // ignore
+  }
+}
+
 function addToRecentFiles(filename, sid) {
   if (!filename) return;
   let list = [];
@@ -2358,37 +2459,66 @@ function removeRecentFile(filename) {
   } catch (e) { list = []; }
   list = list.filter(item => item.filename !== filename);
   localStorage.setItem("pcappal_recent_files", JSON.stringify(list));
+  removeFileFromCache(filename);
   renderRecentFiles();
 }
 
 function renderRecentFiles() {
-  const wrap = $("recent-files-wrap");
-  const listEl = $("recent-files-list");
-  if (!wrap || !listEl) return;
   let list = [];
   try {
     list = JSON.parse(localStorage.getItem("pcappal_recent_files") || "[]");
   } catch (e) { list = []; }
-  if (!list.length) {
-    wrap.style.display = "none";
-    return;
-  }
-  wrap.style.display = "block";
-  let html = "";
-  for (const item of list) {
-    const date = new Date(item.timestamp).toLocaleDateString();
-    const time = new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    html += `
-      <div class="recent-file-item" data-filename="${escapeHtml(item.filename)}" data-sid="${escapeHtml(item.sid)}">
-        <span class="recent-file-name">${escapeHtml(item.filename)}</span>
-        <span class="recent-file-meta">${date} ${time}</span>
-        <button class="recent-file-remove" data-filename="${escapeHtml(item.filename)}" title="移除">×</button>
-      </div>
-    `;
-  }
-  listEl.innerHTML = html;
 
-  listEl.querySelectorAll(".recent-file-item").forEach(el => {
+  // Render in drop zone
+  const wrap = $("recent-files-wrap");
+  const listEl = $("recent-files-list");
+  if (wrap && listEl) {
+    if (!list.length) {
+      wrap.style.display = "none";
+    } else {
+      wrap.style.display = "block";
+      let html = "";
+      for (const item of list) {
+        const date = new Date(item.timestamp).toLocaleDateString();
+        const time = new Date(item.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        html += `
+          <div class="recent-file-item" data-filename="${escapeHtml(item.filename)}" data-sid="${escapeHtml(item.sid)}">
+            <span class="recent-file-name">${escapeHtml(item.filename)}</span>
+            <span class="recent-file-meta">${date} ${time}</span>
+            <button class="recent-file-remove" data-filename="${escapeHtml(item.filename)}" title="移除">×</button>
+          </div>
+        `;
+      }
+      listEl.innerHTML = html;
+      bindRecentFileEvents(listEl);
+    }
+  }
+
+  // Render in sidebar
+  const sidebarWrap = $("recent-files-sidebar");
+  const sidebarList = $("recent-files-sidebar-list");
+  if (sidebarWrap && sidebarList) {
+    if (!list.length) {
+      sidebarWrap.style.display = "none";
+    } else {
+      sidebarWrap.style.display = "block";
+      let html = "";
+      for (const item of list) {
+        html += `
+          <div class="recent-file-item" data-filename="${escapeHtml(item.filename)}" data-sid="${escapeHtml(item.sid)}">
+            <span class="recent-file-name">${escapeHtml(item.filename)}</span>
+            <button class="recent-file-remove" data-filename="${escapeHtml(item.filename)}" title="移除">×</button>
+          </div>
+        `;
+      }
+      sidebarList.innerHTML = html;
+      bindRecentFileEvents(sidebarList);
+    }
+  }
+}
+
+function bindRecentFileEvents(container) {
+  container.querySelectorAll(".recent-file-item").forEach(el => {
     el.addEventListener("click", (e) => {
       if (e.target.classList.contains("recent-file-remove")) return;
       const sid = el.dataset.sid;
@@ -2396,7 +2526,7 @@ function renderRecentFiles() {
       restoreSession(sid, filename);
     });
   });
-  listEl.querySelectorAll(".recent-file-remove").forEach(btn => {
+  container.querySelectorAll(".recent-file-remove").forEach(btn => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       removeRecentFile(btn.dataset.filename);
@@ -2421,6 +2551,19 @@ async function restoreSession(sid, filename) {
     setStatus(`${filename}: ${state.totalPackets} packets`);
     renderCurrentTool();
   } catch (err) {
+    // Session expired, try to re-upload from IndexedDB cache
+    const cached = await getFileFromCache(filename);
+    if (cached && cached.content) {
+      log(`Session expired, re-uploading ${filename} from cache...`, "info");
+      try {
+        const blob = new Blob([cached.content]);
+        const file = new File([blob], filename);
+        await uploadFile(file);
+        return;
+      } catch (reupErr) {
+        log(`Re-upload failed: ${reupErr.message}`, "danger");
+      }
+    }
     log(`Session expired for ${filename}, please re-upload`, "warn");
     clearCurrentSession();
     removeRecentFile(filename);

@@ -101,6 +101,49 @@ def analyze(session: dict) -> dict:
             if 32 <= l < 127:
                 length_ascii += chr(l)
 
+    # Check for trailing hidden data after standard DNS structure
+    trailing_hidden = []
+    trailing_concat = ""
+    for p in packets:
+        if p.get("protocol") == "DNS":
+            dns = p.get("layers", {}).get("dns", {})
+            tr_hex = dns.get("trailing_hex", "")
+            tr_ascii = dns.get("trailing_ascii", "")
+            if tr_hex:
+                trailing_hidden.append({
+                    "index": p["index"],
+                    "hex": tr_hex,
+                    "ascii": tr_ascii,
+                })
+                if tr_ascii:
+                    trailing_concat += tr_ascii
+
+    # Try to detect flag-like patterns in concatenated trailing data
+    flag_matches = []
+    decoded_hex = ""
+    if trailing_concat:
+        # Common flag patterns
+        flag_patterns = [
+            re.compile(r'flag\{[^}]+\}', re.IGNORECASE),
+            re.compile(r'ctf\{[^}]+\}', re.IGNORECASE),
+            re.compile(r'[A-Za-z0-9]{8}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{12}'),
+        ]
+        for pat in flag_patterns:
+            for m in pat.finditer(trailing_concat):
+                flag_matches.append(m.group())
+
+        # If trailing data looks like a hex string, try decoding it
+        clean_hex = "".join(c for c in trailing_concat if c.lower() in "0123456789abcdef")
+        if len(clean_hex) >= 4 and len(clean_hex) % 2 == 0 and all(c.lower() in "0123456789abcdef" for c in trailing_concat):
+            try:
+                decoded_bytes = bytes.fromhex(clean_hex)
+                decoded_hex = "".join(chr(b) if 32 <= b < 127 else "." for b in decoded_bytes)
+                for pat in flag_patterns:
+                    for m in pat.finditer(decoded_hex):
+                        flag_matches.append(m.group())
+            except Exception:
+                pass
+
     return {
         "queryCount": len(queries),
         "answerCount": len(answers),
@@ -111,6 +154,10 @@ def analyze(session: dict) -> dict:
         "topDomains": top_domains,
         "base32Decoded": base32_decoded[:20],
         "subdomainLengthAscii": length_ascii[:500],
+        "trailingHidden": trailing_hidden[:100],
+        "trailingConcat": trailing_concat[:2000],
+        "decodedHexAscii": decoded_hex[:2000],
+        "possibleFlags": list(dict.fromkeys(flag_matches))[:20],
     }
 
 

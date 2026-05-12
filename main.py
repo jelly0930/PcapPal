@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Query
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from backend.session import create_session, get_session, store_packets, rebuild_indexes
@@ -638,6 +638,82 @@ def get_http_transactions(sid: str):
     if not sess:
         raise HTTPException(status_code=404, detail="Session not found")
     return _get_http_transactions_cached(sess)
+
+
+@app.get("/api/session/{sid}/http/export")
+def export_http_transactions(sid: str, mode: str = Query("all")):
+    """Export HTTP transactions as plain text.
+
+    mode: all | request | response
+    """
+    sess = get_session(sid)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    if mode not in ("all", "request", "response"):
+        raise HTTPException(status_code=400, detail="Invalid mode. Use 'all', 'request', or 'response'.")
+
+    transactions = _get_http_transactions_cached(sess)
+
+    def _build_lines():
+        for tx in transactions:
+            tx_id = tx.get("id", 0)
+
+            if mode == "all":
+                # 导出完整请求和响应包
+                has_req = tx.get("method")
+                has_resp = tx.get("status")
+                if not has_req and not has_resp:
+                    continue
+
+                yield f"==============================\r\n"
+                yield f"HTTP 事务 #{tx_id}\r\n"
+                yield f"==============================\r\n"
+
+                if has_req:
+                    yield f"{tx['method']} {tx.get('uri', '')} HTTP/1.1\r\n"
+                    for k, v in (tx.get("requestHeaders") or {}).items():
+                        yield f"{k}: {v}\r\n"
+                    yield "\r\n"
+                    req_body = tx.get("requestBody", "")
+                    if req_body:
+                        yield req_body + "\r\n"
+                    yield "\r\n"
+
+                if has_resp:
+                    yield f"HTTP/1.1 {tx['status']} {tx.get('statusText', '')}\r\n"
+                    for k, v in (tx.get("responseHeaders") or {}).items():
+                        yield f"{k}: {v}\r\n"
+                    yield "\r\n"
+                    resp_body = tx.get("responseBody", "")
+                    if resp_body:
+                        yield resp_body + "\r\n"
+                    yield "\r\n"
+
+            else:
+                # 仅导出内容体，带编号
+                if mode == "request":
+                    req_body = tx.get("requestBody", "")
+                    if req_body:
+                        yield f"#{tx_id}\r\n"
+                        yield req_body + "\r\n\r\n"
+
+                if mode == "response":
+                    resp_body = tx.get("responseBody", "")
+                    if resp_body:
+                        yield f"#{tx_id}\r\n"
+                        yield resp_body + "\r\n\r\n"
+
+    content = "".join(_build_lines())
+    if not content:
+        content = "（无 HTTP 内容可导出）\r\n"
+
+    filename = f"http_{mode}_{sid}.txt"
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
 
 
 def _finalize_tx_from_msg(tx_id: int, req_msg: Optional[Dict], resp_msg: Optional[Dict]) -> Dict[str, Any]:
